@@ -48,17 +48,6 @@ app.use((err, req, res, next) => {
 // Initialize Database Tables
 const initDatabase = async () => {
   try {
-    // TEMPORARY: Drop corrupted tables (remove after first successful deploy)
-    await pool.query(`
-      DROP TABLE IF EXISTS predictions CASCADE;
-      DROP TABLE IF EXISTS matches CASCADE;
-      DROP TABLE IF EXISTS teams CASCADE;
-      DROP TABLE IF EXISTS scoring_rules CASCADE;
-      DROP TABLE IF EXISTS settings CASCADE;
-      DROP TABLE IF EXISTS users CASCADE;
-    `);
-    console.log('✅ Old tables dropped');
-
     // Create tables if they don't exist
     await pool.query(`
       -- Users table
@@ -147,17 +136,19 @@ const initDatabase = async () => {
       ON CONFLICT (key_name) DO NOTHING;
     `);
 
-    // Create default admin user
+    // Create default admin user (if not exists)
     const bcrypt = require('bcryptjs');
     const adminPhone = '0665448641';
     const adminPassword = "hkjwdiuasc3';sdr";
     const hashedPassword = bcrypt.hashSync(adminPassword, 10);
 
     await pool.query(
-      'INSERT INTO users (name, phone, password, is_admin) VALUES ($1, $2, $3, $4)',
+      `INSERT INTO users (name, phone, password, is_admin) 
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (phone) DO UPDATE SET is_admin = true`,
       ['Admin', adminPhone, hashedPassword, true]
     );
-    console.log('✅ Admin user created');
+    console.log('✅ Admin user ready');
 
     console.log('✅ Database initialized successfully');
   } catch (error) {
