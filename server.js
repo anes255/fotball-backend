@@ -48,12 +48,12 @@ app.use((err, req, res, next) => {
 // Initialize Database Tables
 const initDatabase = async () => {
   try {
-    // Create tables
+    // Create tables if they don't exist
     await pool.query(`
       -- Users table
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
-        name VARCHAR(100),
+        name VARCHAR(100) NOT NULL,
         phone VARCHAR(20) UNIQUE,
         email VARCHAR(100) UNIQUE,
         password VARCHAR(255) NOT NULL,
@@ -116,36 +116,7 @@ const initDatabase = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
-
-    // Add missing columns to existing tables (safe migration)
-    const alterStatements = [
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(100)",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(100)",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255)",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS predicted_winner_id INTEGER",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_points INTEGER DEFAULT 0",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS correct_predictions INTEGER DEFAULT 0",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-      "ALTER TABLE teams ADD COLUMN IF NOT EXISTS code VARCHAR(10)",
-      "ALTER TABLE teams ADD COLUMN IF NOT EXISTS flag_url VARCHAR(500)",
-      "ALTER TABLE teams ADD COLUMN IF NOT EXISTS group_name VARCHAR(20)",
-      "ALTER TABLE matches ADD COLUMN IF NOT EXISTS stage VARCHAR(50) DEFAULT 'Groupes'",
-      "ALTER TABLE matches ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'upcoming'",
-      "ALTER TABLE predictions ADD COLUMN IF NOT EXISTS points_earned INTEGER DEFAULT 0"
-    ];
-
-    for (const stmt of alterStatements) {
-      try {
-        await pool.query(stmt);
-      } catch (err) {
-        // Ignore errors for columns that already exist or constraint issues
-        if (!err.message.includes('already exists') && !err.message.includes('duplicate')) {
-          console.log(`Migration notice: ${err.message}`);
-        }
-      }
-    }
+    console.log('✅ Tables ready');
 
     // Insert default scoring rules
     await pool.query(`
@@ -165,28 +136,19 @@ const initDatabase = async () => {
       ON CONFLICT (key_name) DO NOTHING;
     `);
 
-    // Create default admin user
+    // Create default admin user (if not exists)
     const bcrypt = require('bcryptjs');
     const adminPhone = '0665448641';
     const adminPassword = "hkjwdiuasc3';sdr";
     const hashedPassword = bcrypt.hashSync(adminPassword, 10);
 
-    // Check if admin exists
-    const adminCheck = await pool.query('SELECT id FROM users WHERE phone = $1', [adminPhone]);
-    
-    if (adminCheck.rows.length === 0) {
-      await pool.query(
-        'INSERT INTO users (name, phone, password, is_admin) VALUES ($1, $2, $3, $4)',
-        ['Admin', adminPhone, hashedPassword, true]
-      );
-      console.log('✅ Admin user created');
-    } else {
-      await pool.query(
-        'UPDATE users SET is_admin = true, name = COALESCE(name, $1) WHERE phone = $2',
-        ['Admin', adminPhone]
-      );
-      console.log('✅ Admin user updated');
-    }
+    await pool.query(
+      `INSERT INTO users (name, phone, password, is_admin) 
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (phone) DO UPDATE SET is_admin = true`,
+      ['Admin', adminPhone, hashedPassword, true]
+    );
+    console.log('✅ Admin user ready');
 
     console.log('✅ Database initialized successfully');
   } catch (error) {
