@@ -120,8 +120,9 @@ const initDatabase = async () => {
     // Add missing columns to existing tables (safe migration)
     const alterStatements = [
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS name VARCHAR(100)",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20) UNIQUE",
-      "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(100) UNIQUE",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(100)",
+      "ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255)",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS predicted_winner_id INTEGER",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_points INTEGER DEFAULT 0",
       "ALTER TABLE users ADD COLUMN IF NOT EXISTS correct_predictions INTEGER DEFAULT 0",
