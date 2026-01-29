@@ -86,9 +86,10 @@ const initDatabase = async () => {
     `);
     console.log('✓ Scoring rules table ready');
 
-    // Settings table
+    // Settings table - drop and recreate to fix schema issues
+    await pool.query(`DROP TABLE IF EXISTS settings CASCADE`);
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS settings (
+      CREATE TABLE settings (
         id SERIAL PRIMARY KEY,
         key VARCHAR(100) UNIQUE NOT NULL,
         value TEXT
@@ -100,7 +101,6 @@ const initDatabase = async () => {
       VALUES 
         ('predictions_open', 'true'),
         ('show_leaderboard', 'true')
-      ON CONFLICT (key) DO NOTHING
     `);
     console.log('✓ Settings table ready');
 
