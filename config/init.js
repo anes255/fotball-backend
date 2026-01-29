@@ -21,12 +21,9 @@ const initDatabase = async () => {
     `);
     console.log('✓ Users table ready');
 
-    // Teams table - drop and recreate to fix schema issues
-    await pool.query(`DROP TABLE IF EXISTS matches CASCADE`);
-    await pool.query(`DROP TABLE IF EXISTS predictions CASCADE`);
-    await pool.query(`DROP TABLE IF EXISTS teams CASCADE`);
+    // Teams table
     await pool.query(`
-      CREATE TABLE teams (
+      CREATE TABLE IF NOT EXISTS teams (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL UNIQUE,
         code VARCHAR(10),
@@ -89,10 +86,9 @@ const initDatabase = async () => {
     `);
     console.log('✓ Scoring rules table ready');
 
-    // Settings table - drop and recreate to fix schema issues
-    await pool.query(`DROP TABLE IF EXISTS settings CASCADE`);
+    // Settings table
     await pool.query(`
-      CREATE TABLE settings (
+      CREATE TABLE IF NOT EXISTS settings (
         id SERIAL PRIMARY KEY,
         key VARCHAR(100) UNIQUE NOT NULL,
         value TEXT
@@ -104,6 +100,7 @@ const initDatabase = async () => {
       VALUES 
         ('predictions_open', 'true'),
         ('show_leaderboard', 'true')
+      ON CONFLICT (key) DO NOTHING
     `);
     console.log('✓ Settings table ready');
 
