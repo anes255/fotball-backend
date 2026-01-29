@@ -21,9 +21,12 @@ const initDatabase = async () => {
     `);
     console.log('✓ Users table ready');
 
-    // Teams table
+    // Teams table - drop and recreate to fix schema issues
+    await pool.query(`DROP TABLE IF EXISTS matches CASCADE`);
+    await pool.query(`DROP TABLE IF EXISTS predictions CASCADE`);
+    await pool.query(`DROP TABLE IF EXISTS teams CASCADE`);
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS teams (
+      CREATE TABLE teams (
         id SERIAL PRIMARY KEY,
         name VARCHAR(100) NOT NULL UNIQUE,
         code VARCHAR(10),
