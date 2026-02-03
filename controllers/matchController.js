@@ -4,9 +4,9 @@ const ScoringRule = require('../models/ScoringRule');
 const pool = require('../config/database');
 
 const matchController = {
+  // Get all matches (admin)
   async getAll(req, res) {
     try {
-      // Update statuses before returning
       await Match.updateStatuses();
       const matches = await Match.findAll();
       res.json(matches);
@@ -16,12 +16,22 @@ const matchController = {
     }
   },
 
+  // Get matches visible to users (24h filter)
+  async getVisible(req, res) {
+    try {
+      await Match.updateStatuses();
+      const matches = await Match.findVisibleToUsers();
+      res.json(matches);
+    } catch (error) {
+      console.error('Get visible matches error:', error);
+      res.status(500).json({ error: 'Erreur serveur' });
+    }
+  },
+
   async getById(req, res) {
     try {
       const match = await Match.findById(req.params.id);
-      if (!match) {
-        return res.status(404).json({ error: 'Match non trouvé' });
-      }
+      if (!match) return res.status(404).json({ error: 'Match non trouvé' });
       res.json(match);
     } catch (error) {
       console.error('Get match error:', error);
@@ -35,7 +45,7 @@ const matchController = {
       const matches = await Match.findUpcoming();
       res.json(matches);
     } catch (error) {
-      console.error('Get upcoming matches error:', error);
+      console.error('Get upcoming error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
     }
   },
@@ -50,18 +60,36 @@ const matchController = {
     }
   },
 
+  async getByTournamentVisible(req, res) {
+    try {
+      const matches = await Match.findByTournamentVisible(req.params.tournamentId);
+      res.json(matches);
+    } catch (error) {
+      console.error('Get tournament matches visible error:', error);
+      res.status(500).json({ error: 'Erreur serveur' });
+    }
+  },
+
+  // Get matches by team
+  async getByTeam(req, res) {
+    try {
+      const matches = await Match.findByTeam(req.params.teamId);
+      res.json(matches);
+    } catch (error) {
+      console.error('Get team matches error:', error);
+      res.status(500).json({ error: 'Erreur serveur' });
+    }
+  },
+
   async create(req, res) {
     try {
       const { tournament_id, team1_id, team2_id, match_date, stage } = req.body;
-      
       if (!team1_id || !team2_id || !match_date) {
-        return res.status(400).json({ error: 'Tous les champs sont requis' });
+        return res.status(400).json({ error: 'Tous les champs requis' });
       }
-
       if (team1_id === team2_id) {
-        return res.status(400).json({ error: 'Les deux équipes doivent être différentes' });
+        return res.status(400).json({ error: 'Équipes doivent être différentes' });
       }
-
       const match = await Match.create({ tournament_id, team1_id, team2_id, match_date, stage });
       res.status(201).json(match);
     } catch (error) {
@@ -74,9 +102,7 @@ const matchController = {
     try {
       const { tournament_id, team1_id, team2_id, match_date, stage } = req.body;
       const match = await Match.update(req.params.id, { tournament_id, team1_id, team2_id, match_date, stage });
-      if (!match) {
-        return res.status(404).json({ error: 'Match non trouvé' });
-      }
+      if (!match) return res.status(404).json({ error: 'Match non trouvé' });
       res.json(match);
     } catch (error) {
       console.error('Update match error:', error);
@@ -90,17 +116,15 @@ const matchController = {
       const matchId = req.params.id;
 
       if (team1_score === undefined || team2_score === undefined) {
-        return res.status(400).json({ error: 'Les scores sont requis' });
+        return res.status(400).json({ error: 'Scores requis' });
       }
 
       await Match.setResult(matchId, team1_score, team2_score);
-
       const rules = await ScoringRule.getAsObject();
       const predictions = await Prediction.findByMatch(matchId);
       
       for (const pred of predictions) {
         let points = 0;
-        
         if (pred.team1_score === team1_score && pred.team2_score === team2_score) {
           points = rules.exact_score || 3;
         } else if (
@@ -113,7 +137,6 @@ const matchController = {
         }
 
         await Prediction.updatePoints(pred.id, points);
-        
         if (points > 0) {
           await pool.query(
             'UPDATE users SET total_points = total_points + $1, correct_predictions = correct_predictions + 1 WHERE id = $2',
@@ -122,7 +145,7 @@ const matchController = {
         }
       }
 
-      res.json({ message: 'Résultat enregistré et points calculés', predictionsUpdated: predictions.length });
+      res.json({ message: 'Résultat enregistré', predictionsUpdated: predictions.length });
     } catch (error) {
       console.error('Set result error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
@@ -139,7 +162,6 @@ const matchController = {
     }
   },
 
-  // Check if user can predict on a match
   async canPredict(req, res) {
     try {
       const result = await Match.canPredict(req.params.id);
