@@ -1,6 +1,7 @@
 const pool = require('../config/database');
 
 const Match = {
+  // Get all matches (admin sees all)
   async findAll() {
     const result = await pool.query(`
       SELECT m.*, 
@@ -11,6 +12,25 @@ const Match = {
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
+      ORDER BY m.match_date ASC
+    `);
+    return result.rows;
+  },
+
+  // Get matches visible to users (only 24h before or completed)
+  async findVisibleToUsers() {
+    const result = await pool.query(`
+      SELECT m.*, 
+        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
+        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code,
+        tour.name as tournament_name, tour.logo_url as tournament_logo
+      FROM matches m
+      JOIN teams t1 ON m.team1_id = t1.id
+      JOIN teams t2 ON m.team2_id = t2.id
+      LEFT JOIN tournaments tour ON m.tournament_id = tour.id
+      WHERE m.status = 'completed' 
+         OR m.status = 'live'
+         OR m.match_date <= NOW() + INTERVAL '24 hours'
       ORDER BY m.match_date ASC
     `);
     return result.rows;
@@ -45,6 +65,40 @@ const Match = {
     return result.rows;
   },
 
+  // Get matches visible to users for a tournament
+  async findByTournamentVisible(tournamentId) {
+    const result = await pool.query(`
+      SELECT m.*, 
+        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
+        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code
+      FROM matches m
+      JOIN teams t1 ON m.team1_id = t1.id
+      JOIN teams t2 ON m.team2_id = t2.id
+      WHERE m.tournament_id = $1
+        AND (m.status = 'completed' OR m.status = 'live' OR m.match_date <= NOW() + INTERVAL '24 hours')
+      ORDER BY m.match_date ASC
+    `, [tournamentId]);
+    return result.rows;
+  },
+
+  // Get matches by team
+  async findByTeam(teamId) {
+    const result = await pool.query(`
+      SELECT m.*, 
+        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
+        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code,
+        tour.name as tournament_name
+      FROM matches m
+      JOIN teams t1 ON m.team1_id = t1.id
+      JOIN teams t2 ON m.team2_id = t2.id
+      LEFT JOIN tournaments tour ON m.tournament_id = tour.id
+      WHERE (m.team1_id = $1 OR m.team2_id = $1)
+        AND (m.status = 'completed' OR m.status = 'live' OR m.match_date <= NOW() + INTERVAL '24 hours')
+      ORDER BY m.match_date DESC
+    `, [teamId]);
+    return result.rows;
+  },
+
   async findUpcoming() {
     const result = await pool.query(`
       SELECT m.*, 
@@ -55,7 +109,9 @@ const Match = {
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
-      WHERE m.status = 'upcoming' AND m.match_date > NOW()
+      WHERE m.status = 'upcoming' 
+        AND m.match_date > NOW()
+        AND m.match_date <= NOW() + INTERVAL '24 hours'
       ORDER BY m.match_date ASC
     `);
     return result.rows;
@@ -95,7 +151,6 @@ const Match = {
     await pool.query('DELETE FROM matches WHERE id = $1', [id]);
   },
 
-  // Check if match has started - BLOCKS predictions after match time
   async canPredict(id) {
     const result = await pool.query(
       'SELECT match_date, status FROM matches WHERE id = $1',
@@ -107,30 +162,14 @@ const Match = {
     const now = new Date();
     const matchDate = new Date(match.match_date);
     
-    if (match.status === 'completed') {
-      return { canPredict: false, reason: 'Match déjà terminé' };
-    }
-    
-    if (match.status === 'live') {
-      return { canPredict: false, reason: 'Match en cours' };
-    }
-    
-    if (now >= matchDate) {
-      return { canPredict: false, reason: 'Match déjà commencé' };
-    }
-    
+    if (match.status === 'completed') return { canPredict: false, reason: 'Match déjà terminé' };
+    if (match.status === 'live') return { canPredict: false, reason: 'Match en cours' };
+    if (now >= matchDate) return { canPredict: false, reason: 'Match déjà commencé' };
     return { canPredict: true };
   },
 
-  // Update match statuses (called periodically or on access)
   async updateStatuses() {
-    const now = new Date().toISOString();
-    // Mark matches as 'live' when they start
-    await pool.query(`
-      UPDATE matches 
-      SET status = 'live' 
-      WHERE status = 'upcoming' AND match_date <= $1
-    `, [now]);
+    await pool.query(`UPDATE matches SET status = 'live' WHERE status = 'upcoming' AND match_date <= NOW()`);
   }
 };
 
