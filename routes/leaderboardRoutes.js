@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
 
-// Get leaderboard - simple version
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(`
@@ -17,15 +16,12 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Get user public profile and predictions
 router.get('/user/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     
-    // Get user info
     const userResult = await pool.query(
-      `SELECT id, name, total_points, correct_predictions, total_predictions, created_at
-       FROM users WHERE id = $1`,
+      'SELECT id, name, total_points, correct_predictions, total_predictions, created_at FROM users WHERE id = $1',
       [userId]
     );
     
@@ -33,9 +29,8 @@ router.get('/user/:userId', async (req, res) => {
       return res.status(404).json({ error: 'Utilisateur non trouvé' });
     }
 
-    // Get predictions for completed/live matches only
     const predictionsResult = await pool.query(`
-      SELECT p.team1_score, p.team2_score, p.points_earned, p.created_at,
+      SELECT p.team1_score, p.team2_score, p.points_earned,
         m.match_date, m.team1_score as actual_team1_score, m.team2_score as actual_team2_score, m.status,
         t1.name as team1_name, t1.flag_url as team1_flag,
         t2.name as team2_name, t2.flag_url as team2_flag,
@@ -45,23 +40,17 @@ router.get('/user/:userId', async (req, res) => {
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
-      WHERE p.user_id = $1
-        AND (m.status = 'completed' OR m.status = 'live' OR m.match_date <= NOW())
+      WHERE p.user_id = $1 AND (m.status = 'completed' OR m.status = 'live')
       ORDER BY m.match_date DESC
     `, [userId]);
     
-    // Get user rank
-    const rankResult = await pool.query(`
-      SELECT COUNT(*) + 1 as rank
-      FROM users 
-      WHERE total_points > (SELECT total_points FROM users WHERE id = $1)
-    `, [userId]);
+    const rankResult = await pool.query(
+      'SELECT COUNT(*) + 1 as rank FROM users WHERE total_points > (SELECT total_points FROM users WHERE id = $1)',
+      [userId]
+    );
 
     res.json({
-      user: {
-        ...userResult.rows[0],
-        rank: parseInt(rankResult.rows[0].rank)
-      },
+      user: { ...userResult.rows[0], rank: parseInt(rankResult.rows[0].rank) },
       predictions: predictionsResult.rows
     });
   } catch (error) {
