@@ -4,10 +4,10 @@ const Tournament = {
   async findAll() {
     const result = await pool.query(`
       SELECT t.*, 
-        (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id) as match_count,
-        (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND status = 'completed') as completed_matches
+        (SELECT COUNT(*) FROM matches m WHERE m.tournament_id = t.id) as match_count,
+        (SELECT COUNT(*) FROM tournament_teams tt WHERE tt.tournament_id = t.id) as team_count
       FROM tournaments t 
-      ORDER BY t.is_active DESC, t.start_date DESC
+      ORDER BY t.start_date DESC
     `);
     return result.rows;
   },
@@ -15,8 +15,8 @@ const Tournament = {
   async findActive() {
     const result = await pool.query(`
       SELECT t.*, 
-        (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id) as match_count,
-        (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND status = 'completed') as completed_matches
+        (SELECT COUNT(*) FROM matches m WHERE m.tournament_id = t.id) as match_count,
+        (SELECT COUNT(*) FROM tournament_teams tt WHERE tt.tournament_id = t.id) as team_count
       FROM tournaments t 
       WHERE t.is_active = true 
       ORDER BY t.start_date DESC
@@ -27,8 +27,8 @@ const Tournament = {
   async findById(id) {
     const result = await pool.query(`
       SELECT t.*, 
-        (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id) as match_count,
-        (SELECT COUNT(*) FROM matches WHERE tournament_id = t.id AND status = 'completed') as completed_matches
+        (SELECT COUNT(*) FROM matches m WHERE m.tournament_id = t.id) as match_count,
+        (SELECT COUNT(*) FROM tournament_teams tt WHERE tt.tournament_id = t.id) as team_count
       FROM tournaments t 
       WHERE t.id = $1
     `, [id]);
@@ -36,57 +36,50 @@ const Tournament = {
   },
 
   async create(data) {
-    const { name, description, start_date, end_date, logo_url, is_active } = data;
+    const { name, description, start_date, end_date, logo_url, is_active, format } = data;
     const result = await pool.query(
-      `INSERT INTO tournaments (name, description, start_date, end_date, logo_url, is_active) 
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [name, description || null, start_date || null, end_date || null, logo_url || null, is_active !== false]
+      `INSERT INTO tournaments (name, description, start_date, end_date, logo_url, is_active, format)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [name, description, start_date, end_date, logo_url, is_active !== false, format || 'groups_4']
     );
     return result.rows[0];
   },
 
   async update(id, data) {
-    const { name, description, start_date, end_date, logo_url, is_active } = data;
+    const { name, description, start_date, end_date, logo_url, is_active, format } = data;
     const result = await pool.query(
       `UPDATE tournaments 
-       SET name = $1, description = $2, start_date = $3, end_date = $4, logo_url = $5, is_active = $6
-       WHERE id = $7 RETURNING *`,
-      [name, description || null, start_date || null, end_date || null, logo_url || null, is_active, id]
+       SET name = $1, description = $2, start_date = $3, end_date = $4, 
+           logo_url = $5, is_active = $6, format = COALESCE($7, format)
+       WHERE id = $8 RETURNING *`,
+      [name, description, start_date, end_date, logo_url, is_active, format, id]
     );
     return result.rows[0];
   },
 
   async delete(id) {
+    await pool.query('DELETE FROM tournament_teams WHERE tournament_id = $1', [id]);
     await pool.query('UPDATE matches SET tournament_id = NULL WHERE tournament_id = $1', [id]);
     await pool.query('DELETE FROM tournaments WHERE id = $1', [id]);
   },
 
-  async getMatches(id) {
-    const result = await pool.query(`
-      SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code
-      FROM matches m
-      JOIN teams t1 ON m.team1_id = t1.id
-      JOIN teams t2 ON m.team2_id = t2.id
-      WHERE m.tournament_id = $1
-      ORDER BY m.match_date ASC
-    `, [id]);
-    return result.rows;
+  async setActive(id, isActive) {
+    const result = await pool.query(
+      'UPDATE tournaments SET is_active = $1 WHERE id = $2 RETURNING *',
+      [isActive, id]
+    );
+    return result.rows[0];
   },
 
-  async getStandings(id) {
-    // Get matches for this tournament that are completed
-    const result = await pool.query(`
-      SELECT m.*, 
-        t1.name as team1_name, t1.group_name as team1_group,
-        t2.name as team2_name, t2.group_name as team2_group
-      FROM matches m
-      JOIN teams t1 ON m.team1_id = t1.id
-      JOIN teams t2 ON m.team2_id = t2.id
-      WHERE m.tournament_id = $1 AND m.status = 'completed'
-    `, [id]);
-    return result.rows;
+  getFormatOptions() {
+    return [
+      { value: 'groups_4', label: '4 Groupes de 4 (16 équipes)', groups: 4, teamsPerGroup: 4 },
+      { value: 'groups_6', label: '6 Groupes de 4 (24 équipes)', groups: 6, teamsPerGroup: 4 },
+      { value: 'groups_8', label: '8 Groupes de 4 (32 équipes)', groups: 8, teamsPerGroup: 4 },
+      { value: 'knockout_16', label: 'Élimination directe 16', groups: 0, teamsPerGroup: 0 },
+      { value: 'knockout_32', label: 'Élimination directe 32', groups: 0, teamsPerGroup: 0 },
+      { value: 'league', label: 'Championnat', groups: 1, teamsPerGroup: 0 }
+    ];
   }
 };
 
