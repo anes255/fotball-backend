@@ -14,8 +14,7 @@ const User = {
   async create(userData) {
     const { name, phone, password } = userData;
     const result = await pool.query(
-      `INSERT INTO users (name, phone, password) 
-       VALUES ($1, $2, $3) RETURNING *`,
+      'INSERT INTO users (name, phone, password) VALUES ($1, $2, $3) RETURNING *',
       [name, phone, password]
     );
     return result.rows[0];
@@ -27,15 +26,6 @@ const User = {
       [points, id]
     );
     return result.rows[0];
-  },
-
-  async getLeaderboard() {
-    const result = await pool.query(`
-      SELECT id, name, total_points, correct_predictions, total_predictions
-      FROM users 
-      ORDER BY total_points DESC, correct_predictions DESC
-    `);
-    return result.rows;
   }
 };
 
