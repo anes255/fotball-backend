@@ -27,7 +27,7 @@ app.use('/api/predictions', predictionRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/tournaments', tournamentRoutes);
 
-// DEBUG ENDPOINT - Shows database structure
+// DEBUG ENDPOINT
 app.get('/api/debug', async (req, res) => {
   try {
     const usersColumns = await pool.query(`
@@ -45,19 +45,39 @@ app.get('/api/debug', async (req, res) => {
       sample_user: sampleUser.rows[0] || 'no users'
     });
   } catch (error) {
-    res.json({ error: error.message, stack: error.stack });
+    res.json({ error: error.message });
   }
 });
 
-// Leaderboard - Direct query (no model dependency)
+// Leaderboard - Only use columns that exist
 app.get('/api/leaderboard', async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT id, name, total_points, correct_predictions, total_predictions
-      FROM users 
-      ORDER BY total_points DESC, correct_predictions DESC
+    // First check what columns exist
+    const columnsResult = await pool.query(`
+      SELECT column_name FROM information_schema.columns WHERE table_name = 'users'
     `);
-    res.json(result.rows);
+    const columns = columnsResult.rows.map(r => r.column_name);
+    
+    // Build safe query
+    let selectFields = ['id', 'name'];
+    if (columns.includes('total_points')) selectFields.push('total_points');
+    if (columns.includes('correct_predictions')) selectFields.push('correct_predictions');
+    if (columns.includes('total_predictions')) selectFields.push('total_predictions');
+    
+    const orderBy = columns.includes('total_points') ? 'ORDER BY total_points DESC' : 'ORDER BY id';
+    
+    const result = await pool.query(`SELECT ${selectFields.join(', ')} FROM users ${orderBy}`);
+    
+    // Add default values for missing columns
+    const users = result.rows.map(user => ({
+      id: user.id,
+      name: user.name,
+      total_points: user.total_points || 0,
+      correct_predictions: user.correct_predictions || 0,
+      total_predictions: user.total_predictions || 0
+    }));
+    
+    res.json(users);
   } catch (error) {
     console.error('Leaderboard error:', error);
     res.status(500).json({ error: 'Erreur serveur', details: error.message });
@@ -103,7 +123,6 @@ app.get('/api/scoring-rules', async (req, res) => {
     const result = await pool.query('SELECT * FROM scoring_rules ORDER BY id');
     res.json(result.rows);
   } catch (error) {
-    console.error('Scoring rules error:', error);
     res.status(500).json({ error: 'Erreur serveur', details: error.message });
   }
 });
@@ -116,7 +135,6 @@ app.get('/api/settings', async (req, res) => {
     result.rows.forEach(r => { settings[r.key] = r.value; });
     res.json(settings);
   } catch (error) {
-    console.error('Settings error:', error);
     res.status(500).json({ error: 'Erreur serveur', details: error.message });
   }
 });
@@ -131,7 +149,6 @@ app.get('/', (req, res) => {
   res.json({ 
     name: 'Prediction World API',
     version: '2.0.0',
-    features: ['Tournaments', 'Match Time Blocking'],
     endpoints: {
       auth: '/api/auth/*',
       teams: '/api/teams/*',
@@ -145,7 +162,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// 404 handler
+// 404
 app.use((req, res) => {
   res.status(404).json({ error: 'Route non trouvée' });
 });
@@ -153,7 +170,7 @@ app.use((req, res) => {
 // Error handler
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({ error: 'Erreur serveur interne', details: err.message });
+  res.status(500).json({ error: 'Erreur serveur interne' });
 });
 
 const PORT = process.env.PORT || 3000;
