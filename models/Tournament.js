@@ -35,8 +35,7 @@ const Tournament = {
   async create(data) {
     const { name, description, start_date, end_date, logo_url, is_active } = data;
     const result = await pool.query(
-      `INSERT INTO tournaments (name, description, start_date, end_date, logo_url, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      'INSERT INTO tournaments (name, description, start_date, end_date, logo_url, is_active) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
       [name, description, start_date, end_date, logo_url, is_active !== false]
     );
     return result.rows[0];
@@ -45,10 +44,7 @@ const Tournament = {
   async update(id, data) {
     const { name, description, start_date, end_date, logo_url, is_active } = data;
     const result = await pool.query(
-      `UPDATE tournaments 
-       SET name = $1, description = $2, start_date = $3, end_date = $4, 
-           logo_url = $5, is_active = $6
-       WHERE id = $7 RETURNING *`,
+      'UPDATE tournaments SET name = $1, description = $2, start_date = $3, end_date = $4, logo_url = $5, is_active = $6 WHERE id = $7 RETURNING *',
       [name, description, start_date, end_date, logo_url, is_active, id]
     );
     return result.rows[0];
@@ -57,14 +53,6 @@ const Tournament = {
   async delete(id) {
     await pool.query('UPDATE matches SET tournament_id = NULL WHERE tournament_id = $1', [id]);
     await pool.query('DELETE FROM tournaments WHERE id = $1', [id]);
-  },
-
-  async setActive(id, isActive) {
-    const result = await pool.query(
-      'UPDATE tournaments SET is_active = $1 WHERE id = $2 RETURNING *',
-      [isActive, id]
-    );
-    return result.rows[0];
   }
 };
 
