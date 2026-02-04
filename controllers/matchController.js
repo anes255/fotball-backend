@@ -4,7 +4,6 @@ const ScoringRule = require('../models/ScoringRule');
 const pool = require('../config/database');
 
 const matchController = {
-  // Get all matches (admin)
   async getAll(req, res) {
     try {
       await Match.updateStatuses();
@@ -16,7 +15,6 @@ const matchController = {
     }
   },
 
-  // Get matches visible to users (24h filter)
   async getVisible(req, res) {
     try {
       await Match.updateStatuses();
@@ -70,7 +68,6 @@ const matchController = {
     }
   },
 
-  // Get matches by team
   async getByTeam(req, res) {
     try {
       const matches = await Match.findByTeam(req.params.teamId);
@@ -120,32 +117,34 @@ const matchController = {
       }
 
       await Match.setResult(matchId, team1_score, team2_score);
+      
+      // Get scoring rules
       const rules = await ScoringRule.getAsObject();
       const predictions = await Prediction.findByMatch(matchId);
       
+      const actualScore = { team1_score, team2_score };
+      let totalPointsAwarded = 0;
+
       for (const pred of predictions) {
-        let points = 0;
-        if (pred.team1_score === team1_score && pred.team2_score === team2_score) {
-          points = rules.exact_score || 3;
-        } else if (
-          (pred.team1_score > pred.team2_score && team1_score > team2_score) ||
-          (pred.team1_score < pred.team2_score && team1_score < team2_score)
-        ) {
-          points = rules.correct_winner || 2;
-        } else if (pred.team1_score === pred.team2_score && team1_score === team2_score) {
-          points = rules.correct_draw || 3;
-        }
+        // Use enhanced scoring calculation
+        const { points } = ScoringRule.calculatePoints(pred, actualScore, rules);
 
         await Prediction.updatePoints(pred.id, points);
+        
         if (points > 0) {
           await pool.query(
             'UPDATE users SET total_points = total_points + $1, correct_predictions = correct_predictions + 1 WHERE id = $2',
             [points, pred.user_id]
           );
+          totalPointsAwarded += points;
         }
       }
 
-      res.json({ message: 'Résultat enregistré', predictionsUpdated: predictions.length });
+      res.json({ 
+        message: 'Résultat enregistré', 
+        predictionsUpdated: predictions.length,
+        totalPointsAwarded
+      });
     } catch (error) {
       console.error('Set result error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
