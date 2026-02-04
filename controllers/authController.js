@@ -1,28 +1,50 @@
+const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 const authController = {
   async register(req, res) {
     try {
       const { name, phone, password, predicted_winner_id } = req.body;
-      
+
       if (!name || !phone || !password) {
         return res.status(400).json({ error: 'Tous les champs sont requis' });
       }
 
-      if (password.length < 6) {
-        return res.status(400).json({ error: 'Mot de passe: 6 caractères minimum' });
+      // Validate Algerian phone number
+      const cleanPhone = phone.replace(/[\s-]/g, '');
+      if (!/^(05|06|07)[0-9]{8}$/.test(cleanPhone)) {
+        return res.status(400).json({ error: 'Numéro de téléphone algérien invalide' });
       }
 
-      const existingUser = await User.findByPhone(phone);
+      const existingUser = await User.findByPhone(cleanPhone);
       if (existingUser) {
         return res.status(400).json({ error: 'Ce numéro est déjà utilisé' });
       }
 
-      const user = await User.create({ name, phone, password, predicted_winner_id });
-      const token = jwt.sign({ id: user.id, is_admin: user.is_admin }, process.env.JWT_SECRET, { expiresIn: '30d' });
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const user = await User.create({
+        name,
+        phone: cleanPhone,
+        password: hashedPassword,
+        predicted_winner_id: predicted_winner_id || null
+      });
 
-      res.status(201).json({ user, token });
+      const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
+
+      res.status(201).json({
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          is_admin: user.is_admin,
+          total_points: user.total_points,
+          predicted_winner_id: user.predicted_winner_id
+        }
+      });
     } catch (error) {
       console.error('Register error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
@@ -34,24 +56,36 @@ const authController = {
       const { phone, password } = req.body;
 
       if (!phone || !password) {
-        return res.status(400).json({ error: 'Tous les champs sont requis' });
+        return res.status(400).json({ error: 'Téléphone et mot de passe requis' });
       }
 
-      const user = await User.findByPhone(phone);
+      const cleanPhone = phone.replace(/[\s-]/g, '');
+      const user = await User.findByPhone(cleanPhone);
+      
       if (!user) {
-        return res.status(401).json({ error: 'Identifiants incorrects' });
+        return res.status(401).json({ error: 'Numéro de téléphone ou mot de passe incorrect' });
       }
 
-      const validPassword = await User.verifyPassword(password, user.password);
-      if (!validPassword) {
-        return res.status(401).json({ error: 'Identifiants incorrects' });
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Numéro de téléphone ou mot de passe incorrect' });
       }
 
-      const token = jwt.sign({ id: user.id, is_admin: user.is_admin }, process.env.JWT_SECRET, { expiresIn: '30d' });
+      const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
 
       res.json({
-        user: { id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin, total_points: user.total_points },
-        token
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          is_admin: user.is_admin,
+          total_points: user.total_points,
+          correct_predictions: user.correct_predictions,
+          total_predictions: user.total_predictions,
+          predicted_winner_id: user.predicted_winner_id,
+          created_at: user.created_at
+        }
       });
     } catch (error) {
       console.error('Login error:', error);
@@ -59,28 +93,82 @@ const authController = {
     }
   },
 
-  async verify(req, res) {
+  async getProfile(req, res) {
     try {
-      const user = await User.findById(req.user.id);
+      const user = await User.findById(req.userId);
       if (!user) {
         return res.status(404).json({ error: 'Utilisateur non trouvé' });
       }
-      res.json({ user });
+
+      res.json({
+        id: user.id,
+        name: user.name,
+        phone: user.phone,
+        is_admin: user.is_admin,
+        total_points: user.total_points,
+        correct_predictions: user.correct_predictions,
+        total_predictions: user.total_predictions,
+        predicted_winner_id: user.predicted_winner_id,
+        created_at: user.created_at
+      });
     } catch (error) {
-      console.error('Verify error:', error);
+      console.error('Get profile error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
     }
   },
 
-  async getProfile(req, res) {
+  async updateProfile(req, res) {
     try {
-      const user = await User.getProfile(req.user.id);
+      const { predicted_winner_id, name } = req.body;
+      const userId = req.userId;
+
+      const user = await User.findById(userId);
       if (!user) {
         return res.status(404).json({ error: 'Utilisateur non trouvé' });
       }
-      res.json(user);
+
+      const updatedUser = await User.updateProfile(userId, {
+        predicted_winner_id: predicted_winner_id !== undefined ? predicted_winner_id : user.predicted_winner_id,
+        name: name || user.name
+      });
+
+      res.json({
+        id: updatedUser.id,
+        name: updatedUser.name,
+        phone: updatedUser.phone,
+        is_admin: updatedUser.is_admin,
+        total_points: updatedUser.total_points,
+        correct_predictions: updatedUser.correct_predictions,
+        total_predictions: updatedUser.total_predictions,
+        predicted_winner_id: updatedUser.predicted_winner_id,
+        created_at: updatedUser.created_at
+      });
     } catch (error) {
-      console.error('Profile error:', error);
+      console.error('Update profile error:', error);
+      res.status(500).json({ error: 'Erreur serveur' });
+    }
+  },
+
+  async verify(req, res) {
+    try {
+      const user = await User.findById(req.userId);
+      if (!user) {
+        return res.status(404).json({ error: 'Utilisateur non trouvé' });
+      }
+
+      res.json({
+        valid: true,
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          is_admin: user.is_admin,
+          total_points: user.total_points,
+          predicted_winner_id: user.predicted_winner_id
+        }
+      });
+    } catch (error) {
+      console.error('Verify error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
     }
   }
