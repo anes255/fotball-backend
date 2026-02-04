@@ -1,4 +1,5 @@
 const Tournament = require('../models/Tournament');
+const Match = require('../models/Match');
 
 const tournamentController = {
   async getAll(req, res) {
@@ -24,9 +25,7 @@ const tournamentController = {
   async getById(req, res) {
     try {
       const tournament = await Tournament.findById(req.params.id);
-      if (!tournament) {
-        return res.status(404).json({ error: 'Tournoi non trouvé' });
-      }
+      if (!tournament) return res.status(404).json({ error: 'Tournoi non trouvé' });
       res.json(tournament);
     } catch (error) {
       console.error('Get tournament error:', error);
@@ -36,7 +35,7 @@ const tournamentController = {
 
   async getMatches(req, res) {
     try {
-      const matches = await Tournament.getMatches(req.params.id);
+      const matches = await Match.findByTournament(req.params.id);
       res.json(matches);
     } catch (error) {
       console.error('Get tournament matches error:', error);
@@ -46,11 +45,7 @@ const tournamentController = {
 
   async create(req, res) {
     try {
-      const { name, description, start_date, end_date, logo_url, is_active } = req.body;
-      if (!name) {
-        return res.status(400).json({ error: 'Le nom est requis' });
-      }
-      const tournament = await Tournament.create({ name, description, start_date, end_date, logo_url, is_active });
+      const tournament = await Tournament.create(req.body);
       res.status(201).json(tournament);
     } catch (error) {
       console.error('Create tournament error:', error);
@@ -60,11 +55,8 @@ const tournamentController = {
 
   async update(req, res) {
     try {
-      const { name, description, start_date, end_date, logo_url, is_active } = req.body;
-      const tournament = await Tournament.update(req.params.id, { name, description, start_date, end_date, logo_url, is_active });
-      if (!tournament) {
-        return res.status(404).json({ error: 'Tournoi non trouvé' });
-      }
+      const tournament = await Tournament.update(req.params.id, req.body);
+      if (!tournament) return res.status(404).json({ error: 'Tournoi non trouvé' });
       res.json(tournament);
     } catch (error) {
       console.error('Update tournament error:', error);
