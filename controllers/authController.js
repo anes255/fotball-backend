@@ -7,7 +7,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 const authController = {
   async register(req, res) {
     try {
-      const { name, phone, password, predicted_winner_id } = req.body;
+      const { name, phone, password } = req.body;
 
       if (!name || !phone || !password) {
         return res.status(400).json({ error: 'Tous les champs sont requis' });
@@ -28,8 +28,7 @@ const authController = {
       const user = await User.create({
         name,
         phone: cleanPhone,
-        password: hashedPassword,
-        predicted_winner_id: predicted_winner_id || null
+        password: hashedPassword
       });
 
       const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
@@ -41,8 +40,7 @@ const authController = {
           name: user.name,
           phone: user.phone,
           is_admin: user.is_admin,
-          total_points: user.total_points,
-          predicted_winner_id: user.predicted_winner_id
+          total_points: user.total_points
         }
       });
     } catch (error) {
@@ -83,7 +81,6 @@ const authController = {
           total_points: user.total_points,
           correct_predictions: user.correct_predictions,
           total_predictions: user.total_predictions,
-          predicted_winner_id: user.predicted_winner_id,
           created_at: user.created_at
         }
       });
@@ -108,43 +105,10 @@ const authController = {
         total_points: user.total_points,
         correct_predictions: user.correct_predictions,
         total_predictions: user.total_predictions,
-        predicted_winner_id: user.predicted_winner_id,
         created_at: user.created_at
       });
     } catch (error) {
       console.error('Get profile error:', error);
-      res.status(500).json({ error: 'Erreur serveur' });
-    }
-  },
-
-  async updateProfile(req, res) {
-    try {
-      const { predicted_winner_id, name } = req.body;
-      const userId = req.userId;
-
-      const user = await User.findById(userId);
-      if (!user) {
-        return res.status(404).json({ error: 'Utilisateur non trouvé' });
-      }
-
-      const updatedUser = await User.updateProfile(userId, {
-        predicted_winner_id: predicted_winner_id !== undefined ? predicted_winner_id : user.predicted_winner_id,
-        name: name || user.name
-      });
-
-      res.json({
-        id: updatedUser.id,
-        name: updatedUser.name,
-        phone: updatedUser.phone,
-        is_admin: updatedUser.is_admin,
-        total_points: updatedUser.total_points,
-        correct_predictions: updatedUser.correct_predictions,
-        total_predictions: updatedUser.total_predictions,
-        predicted_winner_id: updatedUser.predicted_winner_id,
-        created_at: updatedUser.created_at
-      });
-    } catch (error) {
-      console.error('Update profile error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
     }
   },
@@ -163,8 +127,7 @@ const authController = {
           name: user.name,
           phone: user.phone,
           is_admin: user.is_admin,
-          total_points: user.total_points,
-          predicted_winner_id: user.predicted_winner_id
+          total_points: user.total_points
         }
       });
     } catch (error) {
