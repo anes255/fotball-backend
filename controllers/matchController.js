@@ -1,6 +1,5 @@
 const Match = require('../models/Match');
 const Prediction = require('../models/Prediction');
-const ScoringRule = require('../models/ScoringRule');
 const pool = require('../config/database');
 
 const matchController = {
@@ -63,7 +62,7 @@ const matchController = {
       const matches = await Match.findByTournamentVisible(req.params.tournamentId);
       res.json(matches);
     } catch (error) {
-      console.error('Get tournament matches visible error:', error);
+      console.error('Get tournament visible error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
     }
   },
@@ -117,34 +116,30 @@ const matchController = {
       }
 
       await Match.setResult(matchId, team1_score, team2_score);
-      
-      // Get scoring rules
-      const rules = await ScoringRule.getAsObject();
       const predictions = await Prediction.findByMatch(matchId);
-      
-      const actualScore = { team1_score, team2_score };
-      let totalPointsAwarded = 0;
 
       for (const pred of predictions) {
-        // Use enhanced scoring calculation
-        const { points } = ScoringRule.calculatePoints(pred, actualScore, rules);
-
-        await Prediction.updatePoints(pred.id, points);
+        let points = 0;
+        if (pred.team1_score === team1_score && pred.team2_score === team2_score) {
+          points = 5; // exact score
+        } else {
+          const predWinner = pred.team1_score > pred.team2_score ? 1 : pred.team1_score < pred.team2_score ? 2 : 0;
+          const actualWinner = team1_score > team2_score ? 1 : team1_score < team2_score ? 2 : 0;
+          if (predWinner === actualWinner) {
+            points = actualWinner === 0 ? 3 : 2; // correct draw or winner
+          }
+        }
         
+        await Prediction.updatePoints(pred.id, points);
         if (points > 0) {
           await pool.query(
             'UPDATE users SET total_points = total_points + $1, correct_predictions = correct_predictions + 1 WHERE id = $2',
             [points, pred.user_id]
           );
-          totalPointsAwarded += points;
         }
       }
 
-      res.json({ 
-        message: 'Résultat enregistré', 
-        predictionsUpdated: predictions.length,
-        totalPointsAwarded
-      });
+      res.json({ message: 'Résultat enregistré', predictionsUpdated: predictions.length });
     } catch (error) {
       console.error('Set result error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
