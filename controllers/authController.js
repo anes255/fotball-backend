@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const pool = require('../config/database');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
@@ -18,23 +18,36 @@ const authController = {
         return res.status(400).json({ error: 'Numéro de téléphone algérien invalide' });
       }
 
-      const existingUser = await User.findByPhone(cleanPhone);
-      if (existingUser) {
+      // Check if user exists
+      const existingResult = await pool.query('SELECT id FROM users WHERE phone = $1', [cleanPhone]);
+      if (existingResult.rows.length > 0) {
         return res.status(400).json({ error: 'Ce numéro est déjà utilisé' });
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
-      const user = await User.create({ name, phone: cleanPhone, password: hashedPassword });
-
+      
+      // Insert user - only use columns that exist
+      const result = await pool.query(
+        'INSERT INTO users (name, phone, password) VALUES ($1, $2, $3) RETURNING *',
+        [name, cleanPhone, hashedPassword]
+      );
+      
+      const user = result.rows[0];
       const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
 
       res.status(201).json({
         token,
-        user: { id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin, total_points: user.total_points }
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          is_admin: user.is_admin || false,
+          total_points: user.total_points || 0
+        }
       });
     } catch (error) {
       console.error('Register error:', error);
-      res.status(500).json({ error: 'Erreur serveur' });
+      res.status(500).json({ error: 'Erreur serveur', details: error.message });
     }
   },
 
@@ -47,7 +60,10 @@ const authController = {
       }
 
       const cleanPhone = phone.replace(/[\s-]/g, '');
-      const user = await User.findByPhone(cleanPhone);
+      
+      // Find user
+      const result = await pool.query('SELECT * FROM users WHERE phone = $1', [cleanPhone]);
+      const user = result.rows[0];
       
       if (!user) {
         return res.status(401).json({ error: 'Numéro de téléphone ou mot de passe incorrect' });
@@ -63,40 +79,69 @@ const authController = {
       res.json({
         token,
         user: {
-          id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin,
-          total_points: user.total_points, correct_predictions: user.correct_predictions,
-          total_predictions: user.total_predictions, created_at: user.created_at
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          is_admin: user.is_admin || false,
+          total_points: user.total_points || 0,
+          correct_predictions: user.correct_predictions || 0,
+          total_predictions: user.total_predictions || 0,
+          created_at: user.created_at
         }
       });
     } catch (error) {
       console.error('Login error:', error);
-      res.status(500).json({ error: 'Erreur serveur' });
+      res.status(500).json({ error: 'Erreur serveur', details: error.message });
     }
   },
 
   async getProfile(req, res) {
     try {
-      const user = await User.findById(req.userId);
-      if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+      const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.userId]);
+      const user = result.rows[0];
+      
+      if (!user) {
+        return res.status(404).json({ error: 'Utilisateur non trouvé' });
+      }
+
       res.json({
-        id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin,
-        total_points: user.total_points, correct_predictions: user.correct_predictions,
-        total_predictions: user.total_predictions, created_at: user.created_at
+        id: user.id,
+        name: user.name,
+        phone: user.phone,
+        is_admin: user.is_admin || false,
+        total_points: user.total_points || 0,
+        correct_predictions: user.correct_predictions || 0,
+        total_predictions: user.total_predictions || 0,
+        created_at: user.created_at
       });
     } catch (error) {
       console.error('Get profile error:', error);
-      res.status(500).json({ error: 'Erreur serveur' });
+      res.status(500).json({ error: 'Erreur serveur', details: error.message });
     }
   },
 
   async verify(req, res) {
     try {
-      const user = await User.findById(req.userId);
-      if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
-      res.json({ valid: true, user: { id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin, total_points: user.total_points } });
+      const result = await pool.query('SELECT * FROM users WHERE id = $1', [req.userId]);
+      const user = result.rows[0];
+      
+      if (!user) {
+        return res.status(404).json({ error: 'Utilisateur non trouvé' });
+      }
+
+      res.json({
+        valid: true,
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          is_admin: user.is_admin || false,
+          total_points: user.total_points || 0
+        }
+      });
     } catch (error) {
       console.error('Verify error:', error);
-      res.status(500).json({ error: 'Erreur serveur' });
+      res.status(500).json({ error: 'Erreur serveur', details: error.message });
     }
   }
 };
