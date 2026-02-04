@@ -18,15 +18,12 @@ const authController = {
         return res.status(400).json({ error: 'Numéro de téléphone algérien invalide' });
       }
 
-      // Check if user exists
       const existingResult = await pool.query('SELECT id FROM users WHERE phone = $1', [cleanPhone]);
       if (existingResult.rows.length > 0) {
         return res.status(400).json({ error: 'Ce numéro est déjà utilisé' });
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
-      
-      // Insert user - only use columns that exist
       const result = await pool.query(
         'INSERT INTO users (name, phone, password) VALUES ($1, $2, $3) RETURNING *',
         [name, cleanPhone, hashedPassword]
@@ -47,7 +44,7 @@ const authController = {
       });
     } catch (error) {
       console.error('Register error:', error);
-      res.status(500).json({ error: 'Erreur serveur', details: error.message });
+      res.status(500).json({ error: 'Erreur serveur' });
     }
   },
 
@@ -60,8 +57,6 @@ const authController = {
       }
 
       const cleanPhone = phone.replace(/[\s-]/g, '');
-      
-      // Find user
       const result = await pool.query('SELECT * FROM users WHERE phone = $1', [cleanPhone]);
       const user = result.rows[0];
       
@@ -91,7 +86,7 @@ const authController = {
       });
     } catch (error) {
       console.error('Login error:', error);
-      res.status(500).json({ error: 'Erreur serveur', details: error.message });
+      res.status(500).json({ error: 'Erreur serveur' });
     }
   },
 
@@ -116,7 +111,7 @@ const authController = {
       });
     } catch (error) {
       console.error('Get profile error:', error);
-      res.status(500).json({ error: 'Erreur serveur', details: error.message });
+      res.status(500).json({ error: 'Erreur serveur' });
     }
   },
 
@@ -141,7 +136,7 @@ const authController = {
       });
     } catch (error) {
       console.error('Verify error:', error);
-      res.status(500).json({ error: 'Erreur serveur', details: error.message });
+      res.status(500).json({ error: 'Erreur serveur' });
     }
   }
 };
