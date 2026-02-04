@@ -1,13 +1,12 @@
 const pool = require('../config/database');
 
 const Match = {
-  // Get all matches (admin sees all)
   async findAll() {
     const result = await pool.query(`
       SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code,
-        tour.name as tournament_name, tour.logo_url as tournament_logo
+        t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag,
+        tour.name as tournament_name
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
@@ -17,20 +16,17 @@ const Match = {
     return result.rows;
   },
 
-  // Get matches visible to users (only 24h before or completed)
   async findVisibleToUsers() {
     const result = await pool.query(`
       SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code,
-        tour.name as tournament_name, tour.logo_url as tournament_logo
+        t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag,
+        tour.name as tournament_name
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
-      WHERE m.status = 'completed' 
-         OR m.status = 'live'
-         OR m.match_date <= NOW() + INTERVAL '24 hours'
+      WHERE m.status = 'completed' OR m.status = 'live' OR m.match_date <= NOW() + INTERVAL '24 hours'
       ORDER BY m.match_date ASC
     `);
     return result.rows;
@@ -41,7 +37,7 @@ const Match = {
       SELECT m.*, 
         t1.name as team1_name, t1.flag_url as team1_flag,
         t2.name as team2_name, t2.flag_url as team2_flag,
-        tour.name as tournament_name, tour.logo_url as tournament_logo
+        tour.name as tournament_name
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
@@ -54,8 +50,8 @@ const Match = {
   async findByTournament(tournamentId) {
     const result = await pool.query(`
       SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code
+        t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
@@ -65,12 +61,11 @@ const Match = {
     return result.rows;
   },
 
-  // Get matches visible to users for a tournament
   async findByTournamentVisible(tournamentId) {
     const result = await pool.query(`
       SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code
+        t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
@@ -81,19 +76,17 @@ const Match = {
     return result.rows;
   },
 
-  // Get matches by team
   async findByTeam(teamId) {
     const result = await pool.query(`
       SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code,
+        t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag,
         tour.name as tournament_name
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
-      WHERE (m.team1_id = $1 OR m.team2_id = $1)
-        AND (m.status = 'completed' OR m.status = 'live' OR m.match_date <= NOW() + INTERVAL '24 hours')
+      WHERE m.team1_id = $1 OR m.team2_id = $1
       ORDER BY m.match_date DESC
     `, [teamId]);
     return result.rows;
@@ -102,46 +95,41 @@ const Match = {
   async findUpcoming() {
     const result = await pool.query(`
       SELECT m.*, 
-        t1.name as team1_name, t1.flag_url as team1_flag, t1.code as team1_code,
-        t2.name as team2_name, t2.flag_url as team2_flag, t2.code as team2_code,
+        t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag,
         tour.name as tournament_name
       FROM matches m
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
-      WHERE m.status = 'upcoming' 
-        AND m.match_date > NOW()
-        AND m.match_date <= NOW() + INTERVAL '24 hours'
+      WHERE m.status = 'upcoming'
       ORDER BY m.match_date ASC
     `);
     return result.rows;
   },
 
-  async create(matchData) {
-    const { tournament_id, team1_id, team2_id, match_date, stage } = matchData;
+  async create(data) {
+    const { tournament_id, team1_id, team2_id, match_date, stage } = data;
     const result = await pool.query(
-      `INSERT INTO matches (tournament_id, team1_id, team2_id, match_date, stage) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [tournament_id || null, team1_id, team2_id, match_date, stage || 'Groupes']
+      'INSERT INTO matches (tournament_id, team1_id, team2_id, match_date, stage) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [tournament_id, team1_id, team2_id, match_date, stage]
     );
     return result.rows[0];
   },
 
-  async update(id, matchData) {
-    const { tournament_id, team1_id, team2_id, match_date, stage } = matchData;
+  async update(id, data) {
+    const { tournament_id, team1_id, team2_id, match_date, stage } = data;
     const result = await pool.query(
-      `UPDATE matches 
-       SET tournament_id = $1, team1_id = $2, team2_id = $3, match_date = $4, stage = $5 
-       WHERE id = $6 RETURNING *`,
-      [tournament_id || null, team1_id, team2_id, match_date, stage, id]
+      'UPDATE matches SET tournament_id = $1, team1_id = $2, team2_id = $3, match_date = $4, stage = $5 WHERE id = $6 RETURNING *',
+      [tournament_id, team1_id, team2_id, match_date, stage, id]
     );
     return result.rows[0];
   },
 
   async setResult(id, team1_score, team2_score) {
     const result = await pool.query(
-      'UPDATE matches SET team1_score = $1, team2_score = $2, status = $3 WHERE id = $4 RETURNING *',
-      [team1_score, team2_score, 'completed', id]
+      "UPDATE matches SET team1_score = $1, team2_score = $2, status = 'completed' WHERE id = $3 RETURNING *",
+      [team1_score, team2_score, id]
     );
     return result.rows[0];
   },
@@ -151,25 +139,23 @@ const Match = {
     await pool.query('DELETE FROM matches WHERE id = $1', [id]);
   },
 
-  async canPredict(id) {
-    const result = await pool.query(
-      'SELECT match_date, status FROM matches WHERE id = $1',
-      [id]
-    );
-    if (result.rows.length === 0) return { canPredict: false, reason: 'Match non trouvé' };
-    
-    const match = result.rows[0];
-    const now = new Date();
-    const matchDate = new Date(match.match_date);
-    
-    if (match.status === 'completed') return { canPredict: false, reason: 'Match déjà terminé' };
-    if (match.status === 'live') return { canPredict: false, reason: 'Match en cours' };
-    if (now >= matchDate) return { canPredict: false, reason: 'Match déjà commencé' };
-    return { canPredict: true };
+  async updateStatuses() {
+    await pool.query(`
+      UPDATE matches SET status = 'live' 
+      WHERE status = 'upcoming' AND match_date <= NOW() AND match_date > NOW() - INTERVAL '3 hours'
+    `);
   },
 
-  async updateStatuses() {
-    await pool.query(`UPDATE matches SET status = 'live' WHERE status = 'upcoming' AND match_date <= NOW()`);
+  async canPredict(id) {
+    const result = await pool.query(
+      "SELECT id, status, match_date FROM matches WHERE id = $1",
+      [id]
+    );
+    const match = result.rows[0];
+    if (!match) return { canPredict: false, reason: 'Match not found' };
+    if (match.status !== 'upcoming') return { canPredict: false, reason: 'Match already started' };
+    if (new Date(match.match_date) <= new Date()) return { canPredict: false, reason: 'Match already started' };
+    return { canPredict: true };
   }
 };
 
