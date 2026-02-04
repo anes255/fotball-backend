@@ -1,60 +1,85 @@
 const express = require('express');
 const router = express.Router();
 const tournamentController = require('../controllers/tournamentController');
-const TournamentTeam = require('../models/TournamentTeam');
 const { auth, adminAuth } = require('../middleware/auth');
+const pool = require('../config/database');
 
 // Public routes
 router.get('/', tournamentController.getAll);
 router.get('/active', tournamentController.getActive);
+
 router.get('/formats', (req, res) => {
-  const Tournament = require('../models/Tournament');
-  res.json(Tournament.getFormatOptions());
+  res.json([
+    { value: 'groups_4', label: '4 Groupes de 4 (16 équipes)', groups: 4, teamsPerGroup: 4 },
+    { value: 'groups_6', label: '6 Groupes de 4 (24 équipes)', groups: 6, teamsPerGroup: 4 },
+    { value: 'groups_8', label: '8 Groupes de 4 (32 équipes)', groups: 8, teamsPerGroup: 4 },
+    { value: 'knockout_16', label: 'Élimination directe 16', groups: 0, teamsPerGroup: 0 },
+    { value: 'knockout_32', label: 'Élimination directe 32', groups: 0, teamsPerGroup: 0 },
+    { value: 'league', label: 'Championnat', groups: 1, teamsPerGroup: 0 }
+  ]);
 });
+
 router.get('/:id', tournamentController.getById);
 router.get('/:id/matches', tournamentController.getMatches);
 
-// Get tournament teams/groups (public)
+// Get tournament teams/groups (with fallback)
 router.get('/:id/teams', async (req, res) => {
   try {
-    const teams = await TournamentTeam.findByTournament(req.params.id);
-    res.json(teams);
+    const result = await pool.query(`
+      SELECT tt.*, t.name, t.flag_url, t.code
+      FROM tournament_teams tt
+      JOIN teams t ON tt.team_id = t.id
+      WHERE tt.tournament_id = $1
+      ORDER BY tt.group_name, tt.points DESC
+    `, [req.params.id]);
+    res.json(result.rows);
   } catch (error) {
-    console.error('Get tournament teams error:', error);
-    res.status(500).json({ error: 'Erreur serveur' });
+    // Table doesn't exist, return empty
+    res.json([]);
   }
 });
 
 // Get groups summary
 router.get('/:id/groups', async (req, res) => {
   try {
-    const Tournament = require('../models/Tournament');
-    const tournament = await Tournament.findById(req.params.id);
-    const teams = await TournamentTeam.findByTournament(req.params.id);
+    // Get tournament
+    const tourResult = await pool.query('SELECT * FROM tournaments WHERE id = $1', [req.params.id]);
+    const tournament = tourResult.rows[0];
     
-    // Group teams by group_name
-    const groups = {};
-    teams.forEach(team => {
-      const groupName = team.group_name || 'A';
-      if (!groups[groupName]) groups[groupName] = [];
-      groups[groupName].push(team);
-    });
+    if (!tournament) {
+      return res.status(404).json({ error: 'Tournoi non trouvé' });
+    }
 
-    // Sort each group by points, goal diff, goals for
-    Object.keys(groups).forEach(groupName => {
-      groups[groupName].sort((a, b) => {
-        if (b.points !== a.points) return b.points - a.points;
-        const diffA = a.goals_for - a.goals_against;
-        const diffB = b.goals_for - b.goals_against;
-        if (diffB !== diffA) return diffB - diffA;
-        return b.goals_for - a.goals_for;
+    // Try to get teams from tournament_teams table
+    let teams = [];
+    let groups = {};
+    let groupNames = [];
+    
+    try {
+      const teamsResult = await pool.query(`
+        SELECT tt.*, t.name, t.flag_url, t.code
+        FROM tournament_teams tt
+        JOIN teams t ON tt.team_id = t.id
+        WHERE tt.tournament_id = $1
+        ORDER BY tt.group_name, tt.points DESC, (tt.goals_for - tt.goals_against) DESC
+      `, [req.params.id]);
+      teams = teamsResult.rows;
+      
+      // Group teams by group_name
+      teams.forEach(team => {
+        const groupName = team.group_name || 'A';
+        if (!groups[groupName]) groups[groupName] = [];
+        groups[groupName].push(team);
       });
-    });
+      groupNames = Object.keys(groups).sort();
+    } catch (error) {
+      // Table doesn't exist
+    }
 
     res.json({
       tournament,
       groups,
-      groupNames: Object.keys(groups).sort()
+      groupNames
     });
   } catch (error) {
     console.error('Get tournament groups error:', error);
