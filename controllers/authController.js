@@ -13,7 +13,6 @@ const authController = {
         return res.status(400).json({ error: 'Tous les champs sont requis' });
       }
 
-      // Validate Algerian phone number
       const cleanPhone = phone.replace(/[\s-]/g, '');
       if (!/^(05|06|07)[0-9]{8}$/.test(cleanPhone)) {
         return res.status(400).json({ error: 'Numéro de téléphone algérien invalide' });
@@ -25,23 +24,13 @@ const authController = {
       }
 
       const hashedPassword = await bcrypt.hash(password, 10);
-      const user = await User.create({
-        name,
-        phone: cleanPhone,
-        password: hashedPassword
-      });
+      const user = await User.create({ name, phone: cleanPhone, password: hashedPassword });
 
       const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
 
       res.status(201).json({
         token,
-        user: {
-          id: user.id,
-          name: user.name,
-          phone: user.phone,
-          is_admin: user.is_admin,
-          total_points: user.total_points
-        }
+        user: { id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin, total_points: user.total_points }
       });
     } catch (error) {
       console.error('Register error:', error);
@@ -74,14 +63,9 @@ const authController = {
       res.json({
         token,
         user: {
-          id: user.id,
-          name: user.name,
-          phone: user.phone,
-          is_admin: user.is_admin,
-          total_points: user.total_points,
-          correct_predictions: user.correct_predictions,
-          total_predictions: user.total_predictions,
-          created_at: user.created_at
+          id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin,
+          total_points: user.total_points, correct_predictions: user.correct_predictions,
+          total_predictions: user.total_predictions, created_at: user.created_at
         }
       });
     } catch (error) {
@@ -93,19 +77,11 @@ const authController = {
   async getProfile(req, res) {
     try {
       const user = await User.findById(req.userId);
-      if (!user) {
-        return res.status(404).json({ error: 'Utilisateur non trouvé' });
-      }
-
+      if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
       res.json({
-        id: user.id,
-        name: user.name,
-        phone: user.phone,
-        is_admin: user.is_admin,
-        total_points: user.total_points,
-        correct_predictions: user.correct_predictions,
-        total_predictions: user.total_predictions,
-        created_at: user.created_at
+        id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin,
+        total_points: user.total_points, correct_predictions: user.correct_predictions,
+        total_predictions: user.total_predictions, created_at: user.created_at
       });
     } catch (error) {
       console.error('Get profile error:', error);
@@ -116,20 +92,8 @@ const authController = {
   async verify(req, res) {
     try {
       const user = await User.findById(req.userId);
-      if (!user) {
-        return res.status(404).json({ error: 'Utilisateur non trouvé' });
-      }
-
-      res.json({
-        valid: true,
-        user: {
-          id: user.id,
-          name: user.name,
-          phone: user.phone,
-          is_admin: user.is_admin,
-          total_points: user.total_points
-        }
-      });
+      if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+      res.json({ valid: true, user: { id: user.id, name: user.name, phone: user.phone, is_admin: user.is_admin, total_points: user.total_points } });
     } catch (error) {
       console.error('Verify error:', error);
       res.status(500).json({ error: 'Erreur serveur' });
