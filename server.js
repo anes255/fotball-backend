@@ -50,15 +50,12 @@ app.post('/api/auth/register', async (req, res) => {
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    console.log('Login attempt:', req.body);
     const { phone, password } = req.body || {};
     if (!phone || !password) return res.status(400).json({ error: 'Téléphone et mot de passe requis' });
     const clean = phone.replace(/[\s-]/g, '');
     const r = await pool.query('SELECT * FROM users WHERE phone=$1', [clean]);
-    console.log('User found:', r.rows.length > 0);
     if (!r.rows[0]) return res.status(401).json({ error: 'Identifiants incorrects' });
     const match = await bcrypt.compare(password, r.rows[0].password);
-    console.log('Password match:', match);
     if (!match) return res.status(401).json({ error: 'Identifiants incorrects' });
     const user = { id: r.rows[0].id, name: r.rows[0].name, phone: r.rows[0].phone, is_admin: r.rows[0].is_admin, total_points: r.rows[0].total_points || 0 };
     res.json({ token: jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' }), user });
@@ -66,75 +63,58 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 app.get('/api/auth/verify', auth, async (req, res) => {
-  try {
-    const r = await pool.query('SELECT id,name,phone,is_admin,total_points FROM users WHERE id=$1', [req.userId]);
-    res.json({ valid: true, user: r.rows[0] });
-  } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT id,name,phone,is_admin,total_points FROM users WHERE id=$1', [req.userId]); res.json({ valid: true, user: r.rows[0] }); }
+  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 app.get('/api/auth/profile', auth, async (req, res) => {
-  try {
-    const r = await pool.query('SELECT * FROM users WHERE id=$1', [req.userId]);
-    res.json(r.rows[0]);
-  } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT * FROM users WHERE id=$1', [req.userId]); res.json(r.rows[0]); }
+  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // Teams
 app.get('/api/teams', async (req, res) => {
-  try { const r = await pool.query('SELECT * FROM teams ORDER BY name'); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT * FROM teams ORDER BY name'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/teams/:id', async (req, res) => {
-  try { const r = await pool.query('SELECT * FROM teams WHERE id=$1', [req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT * FROM teams WHERE id=$1', [req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.post('/api/teams', auth, adminAuth, async (req, res) => {
-  try { const { name, code, flag_url } = req.body; const r = await pool.query('INSERT INTO teams(name,code,flag_url) VALUES($1,$2,$3) RETURNING *', [name, code, flag_url]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { name, code, flag_url } = req.body; const r = await pool.query('INSERT INTO teams(name,code,flag_url) VALUES($1,$2,$3) RETURNING *', [name, code, flag_url]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.put('/api/teams/:id', auth, adminAuth, async (req, res) => {
-  try { const { name, code, flag_url } = req.body; const r = await pool.query('UPDATE teams SET name=$1,code=$2,flag_url=$3 WHERE id=$4 RETURNING *', [name, code, flag_url, req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { name, code, flag_url } = req.body; const r = await pool.query('UPDATE teams SET name=$1,code=$2,flag_url=$3 WHERE id=$4 RETURNING *', [name, code, flag_url, req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.delete('/api/teams/:id', auth, adminAuth, async (req, res) => {
-  try { await pool.query('DELETE FROM teams WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { await pool.query('DELETE FROM teams WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // Tournaments
 app.get('/api/tournaments', async (req, res) => {
-  try { const r = await pool.query('SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count FROM tournaments t ORDER BY start_date DESC'); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count FROM tournaments t ORDER BY start_date DESC'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/tournaments/active', async (req, res) => {
-  try { const r = await pool.query('SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count FROM tournaments t WHERE is_active=true ORDER BY start_date DESC'); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count FROM tournaments t WHERE is_active=true ORDER BY start_date DESC'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/tournaments/:id', async (req, res) => {
-  try { const r = await pool.query('SELECT * FROM tournaments WHERE id=$1', [req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT * FROM tournaments WHERE id=$1', [req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/tournaments/:id/matches', async (req, res) => {
-  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE tournament_id=$1 ORDER BY match_date`, [req.params.id]); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE tournament_id=$1 ORDER BY match_date`, [req.params.id]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.post('/api/tournaments', auth, adminAuth, async (req, res) => {
-  try { const { name, description, start_date, end_date, logo_url, is_active } = req.body; const r = await pool.query('INSERT INTO tournaments(name,description,start_date,end_date,logo_url,is_active) VALUES($1,$2,$3,$4,$5,$6) RETURNING *', [name, description, start_date, end_date, logo_url, is_active !== false]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { name, description, start_date, end_date, logo_url, is_active } = req.body; const r = await pool.query('INSERT INTO tournaments(name,description,start_date,end_date,logo_url,is_active) VALUES($1,$2,$3,$4,$5,$6) RETURNING *', [name, description, start_date, end_date, logo_url, is_active !== false]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.put('/api/tournaments/:id', auth, adminAuth, async (req, res) => {
-  try { const { name, description, start_date, end_date, logo_url, is_active } = req.body; const r = await pool.query('UPDATE tournaments SET name=$1,description=$2,start_date=$3,end_date=$4,logo_url=$5,is_active=$6 WHERE id=$7 RETURNING *', [name, description, start_date, end_date, logo_url, is_active, req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { name, description, start_date, end_date, logo_url, is_active } = req.body; const r = await pool.query('UPDATE tournaments SET name=$1,description=$2,start_date=$3,end_date=$4,logo_url=$5,is_active=$6 WHERE id=$7 RETURNING *', [name, description, start_date, end_date, logo_url, is_active, req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.delete('/api/tournaments/:id', auth, adminAuth, async (req, res) => {
-  try { await pool.query('UPDATE matches SET tournament_id=NULL WHERE tournament_id=$1', [req.params.id]); await pool.query('DELETE FROM tournaments WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { await pool.query('UPDATE matches SET tournament_id=NULL WHERE tournament_id=$1', [req.params.id]); await pool.query('DELETE FROM tournaments WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // Matches
 app.get('/api/matches', auth, adminAuth, async (req, res) => {
-  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id ORDER BY match_date`); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id ORDER BY match_date`); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/matches/visible', async (req, res) => {
   try {
@@ -144,32 +124,25 @@ app.get('/api/matches/visible', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/matches/upcoming', async (req, res) => {
-  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE status='upcoming' ORDER BY match_date`); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE status='upcoming' ORDER BY match_date`); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/matches/team/:teamId', async (req, res) => {
-  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE team1_id=$1 OR team2_id=$1 ORDER BY match_date DESC`, [req.params.teamId]); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE team1_id=$1 OR team2_id=$1 ORDER BY match_date DESC`, [req.params.teamId]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/matches/tournament/:id/visible', async (req, res) => {
-  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE tournament_id=$1 AND (status IN ('completed','live') OR match_date <= NOW() + INTERVAL '24 hours') ORDER BY match_date`, [req.params.id]); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE tournament_id=$1 AND (status IN ('completed','live') OR match_date <= NOW() + INTERVAL '24 hours') ORDER BY match_date`, [req.params.id]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/matches/:id', async (req, res) => {
-  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.id=$1`, [req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.id=$1`, [req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.get('/api/matches/:id/can-predict', async (req, res) => {
-  try { const r = await pool.query('SELECT status,match_date FROM matches WHERE id=$1', [req.params.id]); const m = r.rows[0]; res.json({ canPredict: m && m.status === 'upcoming' && new Date(m.match_date) > new Date() }); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT status,match_date FROM matches WHERE id=$1', [req.params.id]); const m = r.rows[0]; res.json({ canPredict: m && m.status === 'upcoming' && new Date(m.match_date) > new Date() }); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.post('/api/matches', auth, adminAuth, async (req, res) => {
-  try { const { tournament_id, team1_id, team2_id, match_date, stage } = req.body; const r = await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status) VALUES($1,$2,$3,$4,$5,$6) RETURNING *', [tournament_id, team1_id, team2_id, match_date, stage, 'upcoming']); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { tournament_id, team1_id, team2_id, match_date, stage } = req.body; const r = await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status) VALUES($1,$2,$3,$4,$5,$6) RETURNING *', [tournament_id, team1_id, team2_id, match_date, stage, 'upcoming']); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.put('/api/matches/:id', auth, adminAuth, async (req, res) => {
-  try { const { tournament_id, team1_id, team2_id, match_date, stage } = req.body; const r = await pool.query('UPDATE matches SET tournament_id=$1,team1_id=$2,team2_id=$3,match_date=$4,stage=$5 WHERE id=$6 RETURNING *', [tournament_id, team1_id, team2_id, match_date, stage, req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { tournament_id, team1_id, team2_id, match_date, stage } = req.body; const r = await pool.query('UPDATE matches SET tournament_id=$1,team1_id=$2,team2_id=$3,match_date=$4,stage=$5 WHERE id=$6 RETURNING *', [tournament_id, team1_id, team2_id, match_date, stage, req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
   try {
@@ -187,14 +160,12 @@ app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.delete('/api/matches/:id', auth, adminAuth, async (req, res) => {
-  try { await pool.query('DELETE FROM predictions WHERE match_id=$1', [req.params.id]); await pool.query('DELETE FROM matches WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { await pool.query('DELETE FROM predictions WHERE match_id=$1', [req.params.id]); await pool.query('DELETE FROM matches WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // Predictions
 app.get('/api/predictions', auth, async (req, res) => {
-  try { const r = await pool.query(`SELECT p.*, m.match_date, m.team1_score as actual_team1_score, m.team2_score as actual_team2_score, m.status, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY m.match_date DESC`, [req.userId]); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query(`SELECT p.*, m.match_date, m.team1_score as actual_team1_score, m.team2_score as actual_team2_score, m.status, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY m.match_date DESC`, [req.userId]); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.post('/api/predictions', auth, async (req, res) => {
   try {
@@ -208,30 +179,41 @@ app.post('/api/predictions', auth, async (req, res) => {
 
 // Leaderboard
 app.get('/api/leaderboard', async (req, res) => {
-  try { const r = await pool.query('SELECT id,name,COALESCE(total_points,0) as total_points FROM users ORDER BY total_points DESC NULLS LAST'); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT id,name,COALESCE(total_points,0) as total_points FROM users ORDER BY total_points DESC NULLS LAST'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // Admin
 app.get('/api/admin/users', auth, adminAuth, async (req, res) => {
-  try { const r = await pool.query('SELECT id,name,phone,is_admin,total_points,created_at FROM users ORDER BY total_points DESC NULLS LAST'); res.json(r.rows); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const r = await pool.query('SELECT id,name,phone,is_admin,total_points,created_at FROM users ORDER BY total_points DESC NULLS LAST'); res.json(r.rows); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.put('/api/admin/users/:id', auth, adminAuth, async (req, res) => {
-  try { const { is_admin, total_points } = req.body; const r = await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),total_points=COALESCE($2,total_points) WHERE id=$3 RETURNING *', [is_admin, total_points, req.params.id]); res.json(r.rows[0]); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { const { is_admin, total_points } = req.body; const r = await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),total_points=COALESCE($2,total_points) WHERE id=$3 RETURNING *', [is_admin, total_points, req.params.id]); res.json(r.rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 app.delete('/api/admin/users/:id', auth, adminAuth, async (req, res) => {
-  try { await pool.query('DELETE FROM predictions WHERE user_id=$1', [req.params.id]); await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); }
-  catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+  try { await pool.query('DELETE FROM predictions WHERE user_id=$1', [req.params.id]); await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ message: 'Supprimé' }); } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
 });
 
 // 404
 app.use((req, res) => res.status(404).json({ error: 'Route non trouvée' }));
 
-// Start
+// Start and reset admin password
 const PORT = process.env.PORT || 3000;
-pool.query('SELECT 1').then(() => {
-  console.log('✓ DB connected');
-  app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
-}).catch(e => { console.error('DB error:', e); process.exit(1); });
+(async () => {
+  try {
+    await pool.query('SELECT 1');
+    console.log('✓ DB connected');
+    
+    // Reset admin password to 'password'
+    const hash = await bcrypt.hash('password', 10);
+    const result = await pool.query('UPDATE users SET password=$1 WHERE phone=$2 RETURNING id', [hash, '0665448641']);
+    if (result.rows.length) {
+      console.log('✓ Admin password reset to: password');
+    } else {
+      // Create admin if not exists
+      await pool.query('INSERT INTO users(name,phone,password,is_admin) VALUES($1,$2,$3,$4)', ['Admin', '0665448641', hash, true]);
+      console.log('✓ Admin created - phone: 0665448641, password: password');
+    }
+    
+    app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+  } catch (e) { console.error('Error:', e); process.exit(1); }
+})();
