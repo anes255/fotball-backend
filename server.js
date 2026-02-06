@@ -61,7 +61,7 @@ const calcPoints = async (pred, t1, t2) => {
   return pts;
 };
 
-app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.2' }));
+app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.3' }));
 
 // Auth
 app.post('/api/auth/register', async (req, res) => {
@@ -124,8 +124,66 @@ app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) =
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Matches - PUBLIC (no auth required for viewing)
-app.get('/api/matches', async (req, res) => { 
+// =====================================================
+// MATCHES - PUBLIC ENDPOINTS (with 24h filter for users)
+// =====================================================
+
+// Get visible matches - ONLY completed, live, OR upcoming within 24 hours
+app.get('/api/matches/visible', async (req, res) => { 
+  try { 
+    const result = await pool.query(`
+      SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, 
+             t2.name as team2_name, t2.flag_url as team2_flag, 
+             tour.name as tournament_name 
+      FROM matches m 
+      JOIN teams t1 ON m.team1_id=t1.id 
+      JOIN teams t2 ON m.team2_id=t2.id 
+      LEFT JOIN tournaments tour ON m.tournament_id=tour.id 
+      WHERE m.status IN ('completed','live') 
+         OR (m.status='upcoming' AND m.match_date <= NOW() + INTERVAL '24 hours' AND m.match_date > NOW())
+      ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date
+    `);
+    res.json(result.rows); 
+  } catch (e) { 
+    console.error('Error fetching visible matches:', e);
+    res.status(500).json({ error: 'Erreur' }); 
+  }
+});
+
+// Get matches by tournament - ONLY completed, live, OR upcoming within 24 hours
+app.get('/api/matches/tournament/:id', async (req, res) => { 
+  try { 
+    const result = await pool.query(`
+      SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, 
+             t2.name as team2_name, t2.flag_url as team2_flag 
+      FROM matches m 
+      JOIN teams t1 ON m.team1_id=t1.id 
+      JOIN teams t2 ON m.team2_id=t2.id 
+      WHERE m.tournament_id=$1 
+        AND (m.status IN ('completed','live') 
+             OR (m.status='upcoming' AND m.match_date <= NOW() + INTERVAL '24 hours' AND m.match_date > NOW()))
+      ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date
+    `, [req.params.id]);
+    res.json(result.rows); 
+  } catch (e) { 
+    console.error('Error fetching tournament matches:', e);
+    res.status(500).json({ error: 'Erreur' }); 
+  }
+});
+
+// Single match - PUBLIC (anyone can view a single match by ID)
+app.get('/api/matches/:id', async (req, res) => { 
+  try { 
+    res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.id=$1`, [req.params.id])).rows[0]); 
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
+});
+
+// =====================================================
+// MATCHES - ADMIN ENDPOINTS (full access to all matches)
+// =====================================================
+
+// Admin: Get ALL matches (no 24h filter)
+app.get('/api/matches', auth, adminAuth, async (req, res) => { 
   try { 
     res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id ORDER BY match_date`)).rows); 
   } catch (e) { 
@@ -134,30 +192,10 @@ app.get('/api/matches', async (req, res) => {
   }
 });
 
-// Matches visible (returns completed, live, AND upcoming within 24h) - PUBLIC
-app.get('/api/matches/visible', async (req, res) => { 
+// Admin: Get ALL matches for a tournament (no 24h filter)
+app.get('/api/admin/matches/tournament/:id', auth, adminAuth, async (req, res) => { 
   try { 
-    res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE m.status IN ('completed','live') OR (m.status='upcoming' AND m.match_date <= NOW() + INTERVAL '24 hours') ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date`)).rows); 
-  } catch (e) { 
-    console.error('Error fetching visible matches:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
-});
-
-// Matches by tournament - PUBLIC
-app.get('/api/matches/tournament/:id', async (req, res) => { 
-  try { 
-    res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.tournament_id=$1 ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date`, [req.params.id])).rows); 
-  } catch (e) { 
-    console.error('Error fetching tournament matches:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
-});
-
-// Single match - PUBLIC
-app.get('/api/matches/:id', async (req, res) => { 
-  try { 
-    res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.id=$1`, [req.params.id])).rows[0]); 
+    res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.tournament_id=$1 ORDER BY match_date`, [req.params.id])).rows); 
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
@@ -213,7 +251,6 @@ app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
     const { team1_score, team2_score } = req.body;
     await pool.query("UPDATE matches SET team1_score=$1, team2_score=$2, status='completed' WHERE id=$3", [team1_score, team2_score, req.params.id]);
     
-    // Calculate points for all predictions
     const preds = (await pool.query('SELECT * FROM predictions WHERE match_id=$1', [req.params.id])).rows;
     for (const p of preds) {
       const pts = await calcPoints(p, team1_score, team2_score);
