@@ -36,7 +36,7 @@ const initDB = async () => {
     CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(20) UNIQUE, password VARCHAR(255), is_admin BOOLEAN DEFAULT FALSE, total_points INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());
     CREATE TABLE IF NOT EXISTS teams (id SERIAL PRIMARY KEY, name VARCHAR(255), code VARCHAR(10), flag_url TEXT);
     CREATE TABLE IF NOT EXISTS tournaments (id SERIAL PRIMARY KEY, name VARCHAR(255), description TEXT, logo_url TEXT, start_date DATE, end_date DATE, is_active BOOLEAN DEFAULT TRUE, format VARCHAR(50) DEFAULT 'groups_4');
-    CREATE TABLE IF NOT EXISTS tournament_teams (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, group_name VARCHAR(10), position INTEGER DEFAULT 0, UNIQUE(tournament_id, team_id));
+    CREATE TABLE IF NOT EXISTS tournament_teams (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, group_name VARCHAR(10), UNIQUE(tournament_id, team_id));
     CREATE TABLE IF NOT EXISTS matches (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team1_id INTEGER REFERENCES teams(id), team2_id INTEGER REFERENCES teams(id), team1_score INTEGER DEFAULT 0, team2_score INTEGER DEFAULT 0, match_date TIMESTAMP, stage VARCHAR(100), status VARCHAR(20) DEFAULT 'upcoming');
     CREATE TABLE IF NOT EXISTS predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, team1_score INTEGER, team2_score INTEGER, points_earned INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, match_id));
     CREATE TABLE IF NOT EXISTS scoring_rules (id SERIAL PRIMARY KEY, rule_type VARCHAR(50) UNIQUE, points INTEGER DEFAULT 0);
@@ -61,7 +61,7 @@ const calcPoints = async (pred, t1, t2) => {
   return pts;
 };
 
-app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.4' }));
+app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.6' }));
 
 // Auth
 app.post('/api/auth/register', async (req, res) => {
@@ -104,7 +104,7 @@ app.get('/api/tournaments/formats', (req, res) => res.json([{value:'groups_4',la
 app.get('/api/tournaments/:id', async (req, res) => { try { res.json((await pool.query('SELECT * FROM tournaments WHERE id=$1', [req.params.id])).rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.get('/api/tournaments/:id/teams', async (req, res) => { 
   try { 
-    const result = await pool.query('SELECT tt.*,t.name,t.code,t.flag_url FROM tournament_teams tt JOIN teams t ON tt.team_id=t.id WHERE tt.tournament_id=$1 ORDER BY tt.group_name,tt.position', [req.params.id]);
+    const result = await pool.query('SELECT tt.id, tt.tournament_id, tt.team_id, tt.group_name, t.name, t.code, t.flag_url FROM tournament_teams tt JOIN teams t ON tt.team_id=t.id WHERE tt.tournament_id=$1 ORDER BY tt.group_name, t.name', [req.params.id]);
     res.json(result.rows); 
   } catch (e) { 
     console.error('Error fetching tournament teams:', e);
@@ -115,24 +115,24 @@ app.post('/api/tournaments', auth, adminAuth, async (req, res) => { try { const 
 app.put('/api/tournaments/:id', auth, adminAuth, async (req, res) => { try { const {name,description,start_date,end_date,logo_url,is_active,format}=req.body; res.json((await pool.query('UPDATE tournaments SET name=$1,description=$2,start_date=$3,end_date=$4,logo_url=$5,is_active=$6,format=$7 WHERE id=$8 RETURNING *', [name,description,start_date,end_date,logo_url,is_active,format,req.params.id])).rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.delete('/api/tournaments/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM tournaments WHERE id=$1', [req.params.id]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 
-// Tournament Teams (bulk) - FIXED with better error handling
+// Tournament Teams (bulk) - NO POSITION COLUMN
 app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) => {
   try {
     const tournamentId = req.params.id;
     const teams = req.body.teams || [];
     
-    console.log('Saving tournament teams:', { tournamentId, teamsCount: teams.length, teams });
+    console.log('Saving tournament teams:', { tournamentId, teamsCount: teams.length });
     
     // Delete existing teams
     await pool.query('DELETE FROM tournament_teams WHERE tournament_id=$1', [tournamentId]);
     
-    // Insert new teams
+    // Insert new teams - ONLY tournament_id, team_id, group_name (NO position)
     let inserted = 0;
     for (const t of teams) {
       if (t.teamId && t.groupName) {
         await pool.query(
-          'INSERT INTO tournament_teams(tournament_id, team_id, group_name, position) VALUES($1, $2, $3, $4)',
-          [tournamentId, t.teamId, t.groupName, t.position || 0]
+          'INSERT INTO tournament_teams(tournament_id, team_id, group_name) VALUES($1, $2, $3)',
+          [tournamentId, t.teamId, t.groupName]
         );
         inserted++;
       }
@@ -150,7 +150,6 @@ app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) =
 // MATCHES - PUBLIC ENDPOINTS (with 24h filter for users)
 // =====================================================
 
-// Get visible matches - ONLY completed, live, OR upcoming within 24 hours
 app.get('/api/matches/visible', async (req, res) => { 
   try { 
     const result = await pool.query(`
@@ -172,7 +171,6 @@ app.get('/api/matches/visible', async (req, res) => {
   }
 });
 
-// Get matches by tournament - ONLY completed, live, OR upcoming within 24 hours
 app.get('/api/matches/tournament/:id', async (req, res) => { 
   try { 
     const result = await pool.query(`
@@ -193,7 +191,6 @@ app.get('/api/matches/tournament/:id', async (req, res) => {
   }
 });
 
-// Single match - PUBLIC (anyone can view a single match by ID)
 app.get('/api/matches/:id', async (req, res) => { 
   try { 
     res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.id=$1`, [req.params.id])).rows[0]); 
@@ -201,10 +198,9 @@ app.get('/api/matches/:id', async (req, res) => {
 });
 
 // =====================================================
-// MATCHES - ADMIN ENDPOINTS (full access to all matches)
+// MATCHES - ADMIN ENDPOINTS
 // =====================================================
 
-// Admin: Get ALL matches (no 24h filter)
 app.get('/api/matches', auth, adminAuth, async (req, res) => { 
   try { 
     res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id ORDER BY match_date`)).rows); 
@@ -214,14 +210,12 @@ app.get('/api/matches', auth, adminAuth, async (req, res) => {
   }
 });
 
-// Admin: Get ALL matches for a tournament (no 24h filter)
 app.get('/api/admin/matches/tournament/:id', auth, adminAuth, async (req, res) => { 
   try { 
     res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.tournament_id=$1 ORDER BY match_date`, [req.params.id])).rows); 
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Match CRUD - Admin only
 app.post('/api/matches', auth, adminAuth, async (req, res) => { 
   try { 
     const {tournament_id,team1_id,team2_id,match_date,stage}=req.body; 
@@ -244,35 +238,25 @@ app.delete('/api/matches/:id', auth, adminAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// START MATCH - Sets status to 'live'
 app.put('/api/matches/:id/start', auth, adminAuth, async (req, res) => {
   try {
     const result = await pool.query("UPDATE matches SET status='live', team1_score=COALESCE(team1_score,0), team2_score=COALESCE(team2_score,0) WHERE id=$1 RETURNING *", [req.params.id]);
     res.json(result.rows[0]);
-  } catch (e) { 
-    console.error('Error starting match:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// UPDATE SCORE - Updates score while match is live (no point calculation)
 app.put('/api/matches/:id/score', auth, adminAuth, async (req, res) => {
   try {
     const { team1_score, team2_score } = req.body;
     const result = await pool.query("UPDATE matches SET team1_score=$1, team2_score=$2 WHERE id=$3 RETURNING *", [team1_score, team2_score, req.params.id]);
     res.json(result.rows[0]);
-  } catch (e) { 
-    console.error('Error updating score:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// COMPLETE MATCH - Ends match and calculates points
 app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
   try {
     const { team1_score, team2_score } = req.body;
     await pool.query("UPDATE matches SET team1_score=$1, team2_score=$2, status='completed' WHERE id=$3", [team1_score, team2_score, req.params.id]);
-    
     const preds = (await pool.query('SELECT * FROM predictions WHERE match_id=$1', [req.params.id])).rows;
     for (const p of preds) {
       const pts = await calcPoints(p, team1_score, team2_score);
@@ -280,13 +264,9 @@ app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
       if (pts > 0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2', [pts, p.user_id]);
     }
     res.json({ message: 'OK', predictions_processed: preds.length });
-  } catch (e) { 
-    console.error('Error completing match:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Legacy endpoint for backward compatibility
 app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
   try {
     const { team1_score, team2_score } = req.body;
@@ -317,7 +297,6 @@ app.post('/api/predictions', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// User predictions (public)
 app.get('/api/users/:id/predictions', async (req, res) => {
   try {
     const user = (await pool.query('SELECT id,name,total_points FROM users WHERE id=$1', [req.params.id])).rows[0];
@@ -355,15 +334,12 @@ app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.jso
 app.put('/api/admin/users/:id', auth, adminAuth, async (req, res) => { try { const {is_admin,total_points}=req.body; res.json((await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),total_points=COALESCE($2,total_points) WHERE id=$3 RETURNING *', [is_admin,total_points,req.params.id])).rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.delete('/api/admin/users/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM users WHERE id=$1', [req.params.id]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 
-// Scoring rules
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.put('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { for (const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2', [v,k]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 
-// Site settings
 app.get('/api/settings', async (req, res) => { try { const s={}; (await pool.query('SELECT * FROM site_settings')).rows.forEach(r=>s[r.setting_key]=r.setting_value); res.json(s); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.put('/api/admin/settings', auth, adminAuth, async (req, res) => { try { for (const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2', [k,v]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 
-// Award tournament winner
 app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => {
   try {
     const { tournament_id, team_id } = req.body;
@@ -377,7 +353,6 @@ app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Start
 const PORT = process.env.PORT || 3000;
 (async () => {
   try {
