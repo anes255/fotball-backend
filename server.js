@@ -61,7 +61,7 @@ const calcPoints = async (pred, t1, t2) => {
   return pts;
 };
 
-app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.3' }));
+app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.4' }));
 
 // Auth
 app.post('/api/auth/register', async (req, res) => {
@@ -115,13 +115,35 @@ app.post('/api/tournaments', auth, adminAuth, async (req, res) => { try { const 
 app.put('/api/tournaments/:id', auth, adminAuth, async (req, res) => { try { const {name,description,start_date,end_date,logo_url,is_active,format}=req.body; res.json((await pool.query('UPDATE tournaments SET name=$1,description=$2,start_date=$3,end_date=$4,logo_url=$5,is_active=$6,format=$7 WHERE id=$8 RETURNING *', [name,description,start_date,end_date,logo_url,is_active,format,req.params.id])).rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.delete('/api/tournaments/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM tournaments WHERE id=$1', [req.params.id]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 
-// Tournament Teams (bulk)
+// Tournament Teams (bulk) - FIXED with better error handling
 app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) => {
   try {
-    await pool.query('DELETE FROM tournament_teams WHERE tournament_id=$1', [req.params.id]);
-    for (const t of req.body.teams) await pool.query('INSERT INTO tournament_teams(tournament_id,team_id,group_name,position) VALUES($1,$2,$3,$4)', [req.params.id, t.teamId, t.groupName, t.position||0]);
-    res.json({ message: 'OK' });
-  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
+    const tournamentId = req.params.id;
+    const teams = req.body.teams || [];
+    
+    console.log('Saving tournament teams:', { tournamentId, teamsCount: teams.length, teams });
+    
+    // Delete existing teams
+    await pool.query('DELETE FROM tournament_teams WHERE tournament_id=$1', [tournamentId]);
+    
+    // Insert new teams
+    let inserted = 0;
+    for (const t of teams) {
+      if (t.teamId && t.groupName) {
+        await pool.query(
+          'INSERT INTO tournament_teams(tournament_id, team_id, group_name, position) VALUES($1, $2, $3, $4)',
+          [tournamentId, t.teamId, t.groupName, t.position || 0]
+        );
+        inserted++;
+      }
+    }
+    
+    console.log('Inserted teams:', inserted);
+    res.json({ message: 'OK', inserted });
+  } catch (e) { 
+    console.error('Error saving tournament teams:', e);
+    res.status(500).json({ error: 'Erreur: ' + e.message }); 
+  }
 });
 
 // =====================================================
