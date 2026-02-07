@@ -174,6 +174,24 @@ app.get('/api/matches/tournament/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
+// Alias endpoint with /visible suffix for frontend compatibility
+app.get('/api/matches/tournament/:id/visible', async (req, res) => { 
+  try { 
+    const result = await pool.query(`
+      SELECT m.*, t1.name as team1_name, t1.flag_url as team1_flag, 
+             t2.name as team2_name, t2.flag_url as team2_flag 
+      FROM matches m 
+      JOIN teams t1 ON m.team1_id=t1.id 
+      JOIN teams t2 ON m.team2_id=t2.id 
+      WHERE m.tournament_id=$1 
+        AND (m.status IN ('completed','live') 
+             OR (m.status='upcoming' AND m.match_date <= NOW() + INTERVAL '24 hours' AND m.match_date > NOW()))
+      ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date
+    `, [req.params.id]);
+    res.json(result.rows); 
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
+});
+
 app.get('/api/matches/:id', async (req, res) => { 
   try { 
     res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.id=$1`, [req.params.id])).rows[0]); 
