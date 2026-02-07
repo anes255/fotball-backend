@@ -61,7 +61,7 @@ const calcPoints = async (pred, t1, t2) => {
   return pts;
 };
 
-app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.7' }));
+app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.8' }));
 
 // Auth
 app.post('/api/auth/register', async (req, res) => {
@@ -304,7 +304,7 @@ app.get('/api/users/:id/predictions', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Tournament winner prediction - FIXED: Check if any match has STARTED (status live or completed)
+// Tournament winner prediction - FIXED: Compare dates in PostgreSQL to avoid timezone issues
 app.get('/api/tournament-winner/:tournamentId', auth, async (req, res) => { 
   try { 
     res.json((await pool.query('SELECT twp.*,t.name as team_name,t.flag_url FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id WHERE twp.user_id=$1 AND twp.tournament_id=$2', [req.userId, req.params.tournamentId])).rows[0] || null); 
@@ -315,9 +315,12 @@ app.post('/api/tournament-winner', auth, async (req, res) => {
   try {
     const { tournament_id, team_id } = req.body;
     
-    // Check if any match has actually started (status = 'live' or 'completed')
+    // Check if first match has started - compare in PostgreSQL to avoid timezone issues
     const startedMatch = (await pool.query(
-      "SELECT id FROM matches WHERE tournament_id=$1 AND status IN ('live', 'completed') LIMIT 1", 
+      `SELECT id FROM matches 
+       WHERE tournament_id = $1 
+       AND (status IN ('live', 'completed') OR match_date <= NOW()) 
+       LIMIT 1`, 
       [tournament_id]
     )).rows[0];
     
@@ -332,6 +335,23 @@ app.post('/api/tournament-winner', auth, async (req, res) => {
     )).rows[0]);
   } catch (e) { 
     console.error('Error saving tournament winner prediction:', e);
+    res.status(500).json({ error: 'Erreur' }); 
+  }
+});
+
+// Check if tournament has started - for frontend to know
+app.get('/api/tournaments/:id/started', async (req, res) => {
+  try {
+    const startedMatch = (await pool.query(
+      `SELECT id FROM matches 
+       WHERE tournament_id = $1 
+       AND (status IN ('live', 'completed') OR match_date <= NOW()) 
+       LIMIT 1`, 
+      [req.params.id]
+    )).rows[0];
+    
+    res.json({ started: !!startedMatch });
+  } catch (e) { 
     res.status(500).json({ error: 'Erreur' }); 
   }
 });
