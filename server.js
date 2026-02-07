@@ -61,7 +61,7 @@ const calcPoints = async (pred, t1, t2) => {
   return pts;
 };
 
-app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.8' }));
+app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.9-debug' }));
 
 // Auth
 app.post('/api/auth/register', async (req, res) => {
@@ -115,28 +115,19 @@ app.post('/api/tournaments', auth, adminAuth, async (req, res) => { try { const 
 app.put('/api/tournaments/:id', auth, adminAuth, async (req, res) => { try { const {name,description,start_date,end_date,logo_url,is_active,format}=req.body; res.json((await pool.query('UPDATE tournaments SET name=$1,description=$2,start_date=$3,end_date=$4,logo_url=$5,is_active=$6,format=$7 WHERE id=$8 RETURNING *', [name,description,start_date,end_date,logo_url,is_active,format,req.params.id])).rows[0]); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 app.delete('/api/tournaments/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM tournaments WHERE id=$1', [req.params.id]); res.json({ message: 'OK' }); } catch (e) { res.status(500).json({ error: 'Erreur' }); }});
 
-// Tournament Teams (bulk) - NO POSITION COLUMN
+// Tournament Teams (bulk)
 app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) => {
   try {
     const tournamentId = req.params.id;
     const teams = req.body.teams || [];
-    
-    console.log('Saving tournament teams:', { tournamentId, teamsCount: teams.length });
-    
     await pool.query('DELETE FROM tournament_teams WHERE tournament_id=$1', [tournamentId]);
-    
     let inserted = 0;
     for (const t of teams) {
       if (t.teamId && t.groupName) {
-        await pool.query(
-          'INSERT INTO tournament_teams(tournament_id, team_id, group_name) VALUES($1, $2, $3)',
-          [tournamentId, t.teamId, t.groupName]
-        );
+        await pool.query('INSERT INTO tournament_teams(tournament_id, team_id, group_name) VALUES($1, $2, $3)', [tournamentId, t.teamId, t.groupName]);
         inserted++;
       }
     }
-    
-    console.log('Inserted teams:', inserted);
     res.json({ message: 'OK', inserted });
   } catch (e) { 
     console.error('Error saving tournament teams:', e);
@@ -145,7 +136,7 @@ app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) =
 });
 
 // =====================================================
-// MATCHES - PUBLIC ENDPOINTS (with 24h filter for users)
+// MATCHES
 // =====================================================
 
 app.get('/api/matches/visible', async (req, res) => { 
@@ -163,10 +154,7 @@ app.get('/api/matches/visible', async (req, res) => {
       ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date
     `);
     res.json(result.rows); 
-  } catch (e) { 
-    console.error('Error fetching visible matches:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
 app.get('/api/matches/tournament/:id', async (req, res) => { 
@@ -183,10 +171,7 @@ app.get('/api/matches/tournament/:id', async (req, res) => {
       ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END, match_date
     `, [req.params.id]);
     res.json(result.rows); 
-  } catch (e) { 
-    console.error('Error fetching tournament matches:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
 app.get('/api/matches/:id', async (req, res) => { 
@@ -195,17 +180,10 @@ app.get('/api/matches/:id', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// =====================================================
-// MATCHES - ADMIN ENDPOINTS
-// =====================================================
-
 app.get('/api/matches', auth, adminAuth, async (req, res) => { 
   try { 
     res.json((await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id ORDER BY match_date`)).rows); 
-  } catch (e) { 
-    console.error('Error fetching matches:', e);
-    res.status(500).json({ error: 'Erreur' }); 
-  }
+  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
 app.get('/api/admin/matches/tournament/:id', auth, adminAuth, async (req, res) => { 
@@ -304,7 +282,7 @@ app.get('/api/users/:id/predictions', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Tournament winner prediction - FIXED: Compare dates in PostgreSQL to avoid timezone issues
+// Tournament winner prediction - WITH DEBUG LOGGING
 app.get('/api/tournament-winner/:tournamentId', auth, async (req, res) => { 
   try { 
     res.json((await pool.query('SELECT twp.*,t.name as team_name,t.flag_url FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id WHERE twp.user_id=$1 AND twp.tournament_id=$2', [req.userId, req.params.tournamentId])).rows[0] || null); 
@@ -315,20 +293,45 @@ app.post('/api/tournament-winner', auth, async (req, res) => {
   try {
     const { tournament_id, team_id } = req.body;
     
-    // Check if first match has started - compare in PostgreSQL to avoid timezone issues
-    const startedMatch = (await pool.query(
-      `SELECT id FROM matches 
-       WHERE tournament_id = $1 
-       AND (status IN ('live', 'completed') OR match_date <= NOW()) 
-       LIMIT 1`, 
+    // DEBUG: Log all matches for this tournament
+    const allMatches = await pool.query(
+      'SELECT id, match_date, status FROM matches WHERE tournament_id = $1 ORDER BY match_date',
       [tournament_id]
-    )).rows[0];
+    );
+    console.log('=== TOURNAMENT WINNER DEBUG ===');
+    console.log('Tournament ID:', tournament_id);
+    console.log('All matches:', allMatches.rows);
     
-    if (startedMatch) {
+    // DEBUG: Get server time
+    const serverTime = await pool.query('SELECT NOW() as now');
+    console.log('Server NOW():', serverTime.rows[0].now);
+    
+    // Check if first match has started - using PostgreSQL comparison
+    const startedMatch = await pool.query(
+      `SELECT id, match_date, status, 
+              (match_date <= NOW()) as time_passed,
+              (status IN ('live', 'completed')) as status_started
+       FROM matches 
+       WHERE tournament_id = $1 
+       ORDER BY match_date 
+       LIMIT 1`,
+      [tournament_id]
+    );
+    
+    console.log('First match check:', startedMatch.rows[0]);
+    
+    // Tournament has started if: first match time has passed OR any match is live/completed
+    const hasStarted = startedMatch.rows[0] && 
+      (startedMatch.rows[0].time_passed || startedMatch.rows[0].status_started);
+    
+    console.log('Has started:', hasStarted);
+    console.log('=== END DEBUG ===');
+    
+    if (hasStarted) {
       return res.status(400).json({ error: 'Tournoi déjà commencé' });
     }
     
-    // If no match has started, allow the prediction
+    // Allow the prediction
     res.json((await pool.query(
       'INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) ON CONFLICT(user_id,tournament_id) DO UPDATE SET team_id=$3 RETURNING *', 
       [req.userId, tournament_id, team_id]
@@ -339,19 +342,25 @@ app.post('/api/tournament-winner', auth, async (req, res) => {
   }
 });
 
-// Check if tournament has started - for frontend to know
+// Check if tournament has started - PUBLIC
 app.get('/api/tournaments/:id/started', async (req, res) => {
   try {
-    const startedMatch = (await pool.query(
-      `SELECT id FROM matches 
+    const startedMatch = await pool.query(
+      `SELECT id, match_date, status, 
+              (match_date <= NOW()) as time_passed
+       FROM matches 
        WHERE tournament_id = $1 
-       AND (status IN ('live', 'completed') OR match_date <= NOW()) 
-       LIMIT 1`, 
+       AND (status IN ('live', 'completed') OR match_date <= NOW())
+       LIMIT 1`,
       [req.params.id]
-    )).rows[0];
+    );
     
-    res.json({ started: !!startedMatch });
+    const started = startedMatch.rows.length > 0;
+    console.log('Tournament', req.params.id, 'started:', started);
+    
+    res.json({ started });
   } catch (e) { 
+    console.error('Error checking tournament started:', e);
     res.status(500).json({ error: 'Erreur' }); 
   }
 });
