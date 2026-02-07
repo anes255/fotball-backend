@@ -61,7 +61,7 @@ const calcPoints = async (pred, t1, t2) => {
   return pts;
 };
 
-app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.6' }));
+app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '2.7' }));
 
 // Auth
 app.post('/api/auth/register', async (req, res) => {
@@ -123,10 +123,8 @@ app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) =
     
     console.log('Saving tournament teams:', { tournamentId, teamsCount: teams.length });
     
-    // Delete existing teams
     await pool.query('DELETE FROM tournament_teams WHERE tournament_id=$1', [tournamentId]);
     
-    // Insert new teams - ONLY tournament_id, team_id, group_name (NO position)
     let inserted = 0;
     for (const t of teams) {
       if (t.teamId && t.groupName) {
@@ -306,7 +304,7 @@ app.get('/api/users/:id/predictions', async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
-// Tournament winner prediction
+// Tournament winner prediction - FIXED: Check if any match has STARTED (status live or completed)
 app.get('/api/tournament-winner/:tournamentId', auth, async (req, res) => { 
   try { 
     res.json((await pool.query('SELECT twp.*,t.name as team_name,t.flag_url FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id WHERE twp.user_id=$1 AND twp.tournament_id=$2', [req.userId, req.params.tournamentId])).rows[0] || null); 
@@ -316,10 +314,26 @@ app.get('/api/tournament-winner/:tournamentId', auth, async (req, res) => {
 app.post('/api/tournament-winner', auth, async (req, res) => {
   try {
     const { tournament_id, team_id } = req.body;
-    const firstMatch = (await pool.query('SELECT match_date FROM matches WHERE tournament_id=$1 ORDER BY match_date LIMIT 1', [tournament_id])).rows[0];
-    if (firstMatch && new Date(firstMatch.match_date) < new Date()) return res.status(400).json({ error: 'Tournoi déjà commencé' });
-    res.json((await pool.query('INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) ON CONFLICT(user_id,tournament_id) DO UPDATE SET team_id=$3 RETURNING *', [req.userId, tournament_id, team_id])).rows[0]);
-  } catch (e) { res.status(500).json({ error: 'Erreur' }); }
+    
+    // Check if any match has actually started (status = 'live' or 'completed')
+    const startedMatch = (await pool.query(
+      "SELECT id FROM matches WHERE tournament_id=$1 AND status IN ('live', 'completed') LIMIT 1", 
+      [tournament_id]
+    )).rows[0];
+    
+    if (startedMatch) {
+      return res.status(400).json({ error: 'Tournoi déjà commencé' });
+    }
+    
+    // If no match has started, allow the prediction
+    res.json((await pool.query(
+      'INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) ON CONFLICT(user_id,tournament_id) DO UPDATE SET team_id=$3 RETURNING *', 
+      [req.userId, tournament_id, team_id]
+    )).rows[0]);
+  } catch (e) { 
+    console.error('Error saving tournament winner prediction:', e);
+    res.status(500).json({ error: 'Erreur' }); 
+  }
 });
 
 // Leaderboard - PUBLIC
