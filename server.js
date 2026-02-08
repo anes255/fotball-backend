@@ -49,6 +49,15 @@ const initDB = async () => {
     try { await pool.query(sql); } catch(e) { console.log('Table creation note:', e.message); }
   }
 
+  // Drop foreign key constraints on best_player_id/best_goal_scorer_id if they exist
+  const dropFKs = [
+    `DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'tournaments_best_player_id_fkey') THEN ALTER TABLE tournaments DROP CONSTRAINT tournaments_best_player_id_fkey; END IF; END $$`,
+    `DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'tournaments_best_goal_scorer_id_fkey') THEN ALTER TABLE tournaments DROP CONSTRAINT tournaments_best_goal_scorer_id_fkey; END IF; END $$`,
+  ];
+  for (const sql of dropFKs) {
+    try { await pool.query(sql); } catch(e) { console.log('Drop FK note:', e.message); }
+  }
+
   // Add columns that may be missing from existing tables
   const alterations = [
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_player_id INTEGER',
