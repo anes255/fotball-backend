@@ -32,28 +32,38 @@ const adminAuth = async (req, res, next) => {
 
 // Initialize DB
 const initDB = async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(20) UNIQUE, password VARCHAR(255), is_admin BOOLEAN DEFAULT FALSE, total_points INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());
-    CREATE TABLE IF NOT EXISTS teams (id SERIAL PRIMARY KEY, name VARCHAR(255), code VARCHAR(10), flag_url TEXT);
-    CREATE TABLE IF NOT EXISTS tournaments (id SERIAL PRIMARY KEY, name VARCHAR(255), description TEXT, logo_url TEXT, start_date DATE, end_date DATE, is_active BOOLEAN DEFAULT TRUE, format VARCHAR(50) DEFAULT 'groups_4', best_player_id INTEGER, best_goal_scorer_id INTEGER);
-    CREATE TABLE IF NOT EXISTS tournament_teams (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, group_name VARCHAR(10), UNIQUE(tournament_id, team_id));
-    CREATE TABLE IF NOT EXISTS matches (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team1_id INTEGER REFERENCES teams(id), team2_id INTEGER REFERENCES teams(id), team1_score INTEGER DEFAULT 0, team2_score INTEGER DEFAULT 0, match_date TIMESTAMP, stage VARCHAR(100), status VARCHAR(20) DEFAULT 'upcoming');
-    CREATE TABLE IF NOT EXISTS predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, team1_score INTEGER, team2_score INTEGER, points_earned INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, match_id));
-    CREATE TABLE IF NOT EXISTS scoring_rules (id SERIAL PRIMARY KEY, rule_type VARCHAR(50) UNIQUE, points INTEGER DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS site_settings (id SERIAL PRIMARY KEY, setting_key VARCHAR(100) UNIQUE, setting_value TEXT);
-    CREATE TABLE IF NOT EXISTS tournament_winner_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id));
-    CREATE TABLE IF NOT EXISTS tournament_players (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL, name VARCHAR(255) NOT NULL, photo_url TEXT, position VARCHAR(100));
-    CREATE TABLE IF NOT EXISTS player_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, best_player_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, best_goal_scorer_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id));
-  `);
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(20) UNIQUE, password VARCHAR(255), is_admin BOOLEAN DEFAULT FALSE, total_points INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())`,
+    `CREATE TABLE IF NOT EXISTS teams (id SERIAL PRIMARY KEY, name VARCHAR(255), code VARCHAR(10), flag_url TEXT)`,
+    `CREATE TABLE IF NOT EXISTS tournaments (id SERIAL PRIMARY KEY, name VARCHAR(255), description TEXT, logo_url TEXT, start_date DATE, end_date DATE, is_active BOOLEAN DEFAULT TRUE, format VARCHAR(50) DEFAULT 'groups_4')`,
+    `CREATE TABLE IF NOT EXISTS tournament_teams (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, group_name VARCHAR(10), UNIQUE(tournament_id, team_id))`,
+    `CREATE TABLE IF NOT EXISTS matches (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team1_id INTEGER REFERENCES teams(id), team2_id INTEGER REFERENCES teams(id), team1_score INTEGER DEFAULT 0, team2_score INTEGER DEFAULT 0, match_date TIMESTAMP, stage VARCHAR(100), status VARCHAR(20) DEFAULT 'upcoming')`,
+    `CREATE TABLE IF NOT EXISTS predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, team1_score INTEGER, team2_score INTEGER, points_earned INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW(), UNIQUE(user_id, match_id))`,
+    `CREATE TABLE IF NOT EXISTS scoring_rules (id SERIAL PRIMARY KEY, rule_type VARCHAR(50) UNIQUE, points INTEGER DEFAULT 0)`,
+    `CREATE TABLE IF NOT EXISTS site_settings (id SERIAL PRIMARY KEY, setting_key VARCHAR(100) UNIQUE, setting_value TEXT)`,
+    `CREATE TABLE IF NOT EXISTS tournament_winner_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
+    `CREATE TABLE IF NOT EXISTS tournament_players (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL, name VARCHAR(255) NOT NULL, photo_url TEXT, position VARCHAR(100))`,
+    `CREATE TABLE IF NOT EXISTS player_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, best_player_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, best_goal_scorer_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
+  ];
+  for (const sql of tables) {
+    try { await pool.query(sql); } catch(e) { console.log('Table creation note:', e.message); }
+  }
 
-  // Add columns to tournaments if they don't exist
-  try { await pool.query('ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_player_id INTEGER'); } catch(e) {}
-  try { await pool.query('ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_goal_scorer_id INTEGER'); } catch(e) {}
+  // Add columns that may be missing from existing tables
+  const alterations = [
+    'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_player_id INTEGER',
+    'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_goal_scorer_id INTEGER',
+    'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS format VARCHAR(50) DEFAULT \'groups_4\'',
+  ];
+  for (const sql of alterations) {
+    try { await pool.query(sql); } catch(e) { console.log('Alter note:', e.message); }
+  }
 
   const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['best_player',7],['best_goal_scorer',7]];
   for (const [t,p] of rules) await pool.query('INSERT INTO scoring_rules(rule_type,points) VALUES($1,$2) ON CONFLICT DO NOTHING',[t,p]);
   const colors = [['primary_color','#6366f1'],['accent_color','#8b5cf6'],['bg_color','#0f172a'],['card_color','#1e293b']];
   for (const [k,v] of colors) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT DO NOTHING',[k,v]);
+  console.log('Database initialized successfully');
 };
 
 // Calculate points
@@ -271,13 +281,14 @@ app.post('/api/tournaments/:id/player-prediction', auth, async (req, res) => {
 // Admin: Set tournament best player & best goal scorer winners + award points
 app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async (req, res) => {
   try {
-    const tournamentId = req.params.id;
-    const { best_player_id, best_goal_scorer_id } = req.body;
+    const tournamentId = parseInt(req.params.id);
+    const bpId = req.body.best_player_id ? parseInt(req.body.best_player_id) : null;
+    const gsId = req.body.best_goal_scorer_id ? parseInt(req.body.best_goal_scorer_id) : null;
 
     // Update tournament with winners
     await pool.query(
       'UPDATE tournaments SET best_player_id = $1, best_goal_scorer_id = $2 WHERE id = $3',
-      [best_player_id || null, best_goal_scorer_id || null, tournamentId]
+      [bpId, gsId, tournamentId]
     );
 
     // Get scoring rules
@@ -289,10 +300,10 @@ app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async
     let totalRewarded = 0;
 
     // Award points for correct best player predictions
-    if (best_player_id) {
+    if (bpId) {
       const correctBP = (await pool.query(
         'SELECT user_id FROM player_predictions WHERE tournament_id = $1 AND best_player_id = $2',
-        [tournamentId, best_player_id]
+        [tournamentId, bpId]
       )).rows;
       for (const u of correctBP) {
         await pool.query('UPDATE users SET total_points = COALESCE(total_points,0) + $1 WHERE id = $2', [bestPlayerPts, u.user_id]);
@@ -301,10 +312,10 @@ app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async
     }
 
     // Award points for correct best goal scorer predictions
-    if (best_goal_scorer_id) {
+    if (gsId) {
       const correctGS = (await pool.query(
         'SELECT user_id FROM player_predictions WHERE tournament_id = $1 AND best_goal_scorer_id = $2',
-        [tournamentId, best_goal_scorer_id]
+        [tournamentId, gsId]
       )).rows;
       for (const u of correctGS) {
         await pool.query('UPDATE users SET total_points = COALESCE(total_points,0) + $1 WHERE id = $2', [bestGoalScorerPts, u.user_id]);
@@ -312,19 +323,19 @@ app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async
       }
     }
 
-    // Update player_predictions points_earned for users who got any right
+    // Update player_predictions points_earned
     const allPreds = (await pool.query('SELECT * FROM player_predictions WHERE tournament_id = $1', [tournamentId])).rows;
     for (const pp of allPreds) {
       let pts = 0;
-      if (best_player_id && pp.best_player_id === best_player_id) pts += bestPlayerPts;
-      if (best_goal_scorer_id && pp.best_goal_scorer_id === best_goal_scorer_id) pts += bestGoalScorerPts;
+      if (bpId && pp.best_player_id === bpId) pts += bestPlayerPts;
+      if (gsId && pp.best_goal_scorer_id === gsId) pts += bestGoalScorerPts;
       await pool.query('UPDATE player_predictions SET points_earned = $1 WHERE id = $2', [pts, pp.id]);
     }
 
     res.json({ message: `Gagnants définis ! ${totalRewarded} récompense(s) attribuée(s)` });
   } catch (e) {
-    console.error('Error setting player winners:', e);
-    res.status(500).json({ error: 'Erreur' });
+    console.error('Error setting player winners:', e.message, e.stack);
+    res.status(500).json({ error: 'Erreur: ' + e.message });
   }
 });
 
