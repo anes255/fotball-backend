@@ -49,6 +49,34 @@ const initDatabase = async () => {
     `);
     console.log('✓ Teams table ready');
 
+    // Players table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS players (
+        id SERIAL PRIMARY KEY,
+        tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE,
+        name VARCHAR(100) NOT NULL,
+        team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL,
+        photo_url TEXT,
+        position VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✓ Players table ready');
+
+    // Add best player and goal scorer columns to tournaments
+    await pool.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='tournaments' AND column_name='best_player_id') THEN
+          ALTER TABLE tournaments ADD COLUMN best_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL;
+        END IF;
+        
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='tournaments' AND column_name='best_goal_scorer_id') THEN
+          ALTER TABLE tournaments ADD COLUMN best_goal_scorer_id INTEGER REFERENCES players(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
+
     // Matches table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS matches (
@@ -90,6 +118,22 @@ const initDatabase = async () => {
     `);
     console.log('✓ Predictions table ready');
 
+    // Tournament predictions table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tournament_predictions (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE,
+        best_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+        best_goal_scorer_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+        points_earned INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, tournament_id)
+      )
+    `);
+    console.log('✓ Tournament predictions table ready');
+
     // Scoring rules table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS scoring_rules (
@@ -106,7 +150,9 @@ const initDatabase = async () => {
         ('exact_score', 3, 'Score exact'),
         ('correct_winner', 2, 'Bon vainqueur'),
         ('correct_draw', 3, 'Match nul correct'),
-        ('tournament_winner', 5, 'Vainqueur du tournoi')
+        ('tournament_winner', 5, 'Vainqueur du tournoi'),
+        ('best_player', 10, 'Meilleur joueur correct'),
+        ('best_goal_scorer', 10, 'Meilleur buteur correct')
       ON CONFLICT (rule_type) DO NOTHING
     `);
     console.log('✓ Scoring rules table ready');
