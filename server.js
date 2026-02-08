@@ -70,7 +70,7 @@ const initDB = async () => {
 
   const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['best_player',7],['best_goal_scorer',7]];
   for (const [t,p] of rules) await pool.query('INSERT INTO scoring_rules(rule_type,points) VALUES($1,$2) ON CONFLICT DO NOTHING',[t,p]);
-  const colors = [['primary_color','#6366f1'],['accent_color','#8b5cf6'],['bg_color','#0f172a'],['card_color','#1e293b']];
+  const colors = [['primary_color','#6366f1'],['accent_color','#8b5cf6'],['bg_color','#0f172a'],['card_color','#1e293b'],['site_name','Prediction World'],['site_logo','']];
   for (const [k,v] of colors) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT DO NOTHING',[k,v]);
   console.log('Database initialized successfully');
 };
