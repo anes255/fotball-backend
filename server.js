@@ -65,7 +65,23 @@ const initDB = async () => {
   const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['best_player',7],['best_goal_scorer',7]];
   for (const [t,p] of rules) await pool.query('INSERT INTO scoring_rules(rule_type,points) VALUES($1,$2) ON CONFLICT DO NOTHING',[t,p]);
 
-  const defaults = [['primary_color','#6366f1'],['accent_color','#8b5cf6'],['bg_color','#0f172a'],['card_color','#1e293b'],['header_name','Prediction World'],['header_logo',''],['home_name','Prediction World'],['home_logo',''],['site_name','Prediction World'],['site_logo','']];
+  const defaults = [
+    ['primary_color','#f9ad00'],['accent_color','#ff6b00'],['secondary_color','#22c55e'],
+    ['bg_color','#0f172a'],['bg_color_2','#1e293b'],
+    ['card_color','rgba(255, 255, 255, 0.05)'],['card_border','rgba(255, 255, 255, 0.1)'],
+    ['navbar_bg','rgba(15, 23, 42, 0.95)'],['navbar_text','#ffffff'],
+    ['text_color','#ffffff'],['text_muted','#9ca3af'],
+    ['gradient_start','#f9ad00'],['gradient_end','#ff6b00'],
+    ['success_color','#22c55e'],['error_color','#ef4444'],['warning_color','#f59e0b'],['live_color','#ef4444'],
+    ['scrollbar_thumb','#f9ad00'],['scrollbar_track','#1e293b'],
+    ['btn_primary_bg','#f9ad00'],['btn_primary_hover','#d97706'],
+    ['btn_secondary_bg','#2e7d32'],['btn_secondary_hover','#15803d'],
+    ['input_bg','#374151'],['input_border','#4b5563'],
+    ['font_heading','Bebas Neue'],['font_body','Poppins'],['border_radius','12'],
+    ['header_name','Prediction World'],['header_logo',''],
+    ['home_name','Prediction World'],['home_logo',''],
+    ['site_name','Prediction World'],['site_logo','']
+  ];
   for (const [k,v] of defaults) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT DO NOTHING',[k,v]);
   console.log('DB initialized');
 };
@@ -198,10 +214,53 @@ app.post('/api/tournament-winner', auth, async (req, res) => { try { const {tour
 app.get('/api/tournaments/:id/started', async (req, res) => { try { const t=(await pool.query('SELECT has_started FROM tournaments WHERE id=$1',[req.params.id])).rows[0]; res.json({started:t?.has_started||false}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Leaderboard - computed from predictions
-app.get('/api/leaderboard', async (req, res) => { try { res.json((await pool.query(`SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+app.get('/api/leaderboard', async (req, res) => { try { res.json((await pool.query(`SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
 
-// Per-tournament leaderboard
-app.get('/api/leaderboard/tournament/:id', async (req, res) => { try { const tid=req.params.id; res.json((await pool.query(`SELECT * FROM (SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.tournament_id=$1 AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id AND twp.tournament_id=$1),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id AND pp.tournament_id=$1),0) AS total_points,(SELECT COUNT(*) FROM predictions p2 JOIN matches m2 ON p2.match_id=m2.id WHERE p2.user_id=u.id AND m2.tournament_id=$1) as total_predictions FROM users u) sub WHERE sub.total_points>0 OR sub.total_predictions>0 ORDER BY sub.total_points DESC,sub.name`,[tid])).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+// Per-tournament leaderboard with full stats
+app.get('/api/leaderboard/tournament/:id', async (req, res) => { try { const tid=req.params.id; res.json((await pool.query(`SELECT * FROM (SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.tournament_id=$1 AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id AND twp.tournament_id=$1),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id AND pp.tournament_id=$1),0) AS total_points,(SELECT COUNT(*) FROM predictions p2 JOIN matches m2 ON p2.match_id=m2.id WHERE p2.user_id=u.id AND m2.tournament_id=$1) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.tournament_id=$1 AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.tournament_id=$1 AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.tournament_id=$1 AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u) sub WHERE sub.total_points>0 OR sub.total_predictions>0 ORDER BY sub.total_points DESC,sub.name`,[tid])).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+
+// Daily correct predictions - users who got it right today
+app.get('/api/daily-winners', async (req, res) => {
+  try {
+    const dateParam = req.query.date; // optional YYYY-MM-DD
+    const dateFilter = dateParam || 'NOW()';
+    const dateClause = dateParam ? `$1::date` : `CURRENT_DATE`;
+    const params = dateParam ? [dateParam] : [];
+
+    // Get matches completed today
+    const matchesQuery = `SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name
+      FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id
+      WHERE m.status='completed' AND DATE(m.match_date)=${dateClause} ORDER BY m.match_date`;
+    const matches = (await pool.query(matchesQuery, params)).rows;
+
+    // Get all correct predictions for today's matches
+    const matchIds = matches.map(m => m.id);
+    let winners = [];
+    if (matchIds.length > 0) {
+      const predsQuery = `SELECT p.*,u.name as user_name,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,
+        m.match_date,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name,
+        CASE WHEN p.team1_score=m.team1_score AND p.team2_score=m.team2_score THEN 'exact' ELSE 'correct' END as prediction_type
+        FROM predictions p JOIN users u ON p.user_id=u.id JOIN matches m ON p.match_id=m.id
+        JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id
+        WHERE p.match_id=ANY($${params.length+1}) AND p.points_earned>0
+        ORDER BY p.points_earned DESC,u.name`;
+      winners = (await pool.query(predsQuery, [...params, matchIds])).rows;
+    }
+
+    // Summary: group by user
+    const userMap = {};
+    winners.forEach(w => {
+      if (!userMap[w.user_id]) userMap[w.user_id] = { user_id: w.user_id, user_name: w.user_name, total_points: 0, exact_count: 0, correct_count: 0, predictions: [] };
+      userMap[w.user_id].total_points += w.points_earned || 0;
+      if (w.prediction_type === 'exact') userMap[w.user_id].exact_count++;
+      else userMap[w.user_id].correct_count++;
+      userMap[w.user_id].predictions.push(w);
+    });
+    const userSummary = Object.values(userMap).sort((a, b) => b.total_points - a.total_points);
+
+    res.json({ date: dateParam || new Date().toISOString().split('T')[0], matches, winners: userSummary, total_matches: matches.length });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
 
 // Admin
 app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,total_points,created_at FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
