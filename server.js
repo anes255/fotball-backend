@@ -217,13 +217,11 @@ app.get('/api/tournaments/:id/started', async (req, res) => { try { const t=(awa
 app.get('/api/tournaments/:id/standings', async (req, res) => {
   try {
     const tid = req.params.id;
-    // Get all teams with groups
     const teams = (await pool.query(`SELECT tt.team_id, tt.group_name, t.name, t.flag_url
       FROM tournament_teams tt JOIN teams t ON tt.team_id=t.id WHERE tt.tournament_id=$1 ORDER BY tt.group_name,t.name`, [tid])).rows;
-    // Get all completed group stage matches
-    const matches = (await pool.query(`SELECT * FROM matches WHERE tournament_id=$1 AND status='completed' AND (stage IS NULL OR stage='' OR LOWER(stage) LIKE '%group%' OR LOWER(stage) LIKE '%poule%' OR LOWER(stage) LIKE '%phase%')`, [tid])).rows;
+    // Get ALL completed matches for this tournament
+    const matches = (await pool.query(`SELECT * FROM matches WHERE tournament_id=$1 AND status='completed'`, [tid])).rows;
 
-    // Compute standings per team
     const stats = {};
     teams.forEach(t => {
       stats[t.team_id] = { team_id: t.team_id, name: t.name, flag_url: t.flag_url, group_name: t.group_name,
@@ -233,18 +231,19 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     matches.forEach(m => {
       const t1 = stats[m.team1_id], t2 = stats[m.team2_id];
       if (!t1 || !t2) return;
-      t1.played++; t2.played++;
-      t1.gf += m.team1_score; t1.ga += m.team2_score;
-      t2.gf += m.team2_score; t2.ga += m.team1_score;
-      if (m.team1_score > m.team2_score) { t1.won++; t1.points += 3; t2.lost++; }
-      else if (m.team1_score < m.team2_score) { t2.won++; t2.points += 3; t1.lost++; }
-      else { t1.drawn++; t2.drawn++; t1.points += 1; t2.points += 1; }
+      // Only count if both teams are in the same group (group stage match)
+      if (t1.group_name && t2.group_name && t1.group_name === t2.group_name) {
+        t1.played++; t2.played++;
+        t1.gf += m.team1_score; t1.ga += m.team2_score;
+        t2.gf += m.team2_score; t2.ga += m.team1_score;
+        if (m.team1_score > m.team2_score) { t1.won++; t1.points += 3; t2.lost++; }
+        else if (m.team1_score < m.team2_score) { t2.won++; t2.points += 3; t1.lost++; }
+        else { t1.drawn++; t2.drawn++; t1.points += 1; t2.points += 1; }
+      }
     });
 
-    // Add goal diff
     Object.values(stats).forEach(s => { s.gd = s.gf - s.ga; });
 
-    // Group by group_name and sort
     const groups = {};
     Object.values(stats).forEach(s => {
       const g = s.group_name || 'Sans groupe';
