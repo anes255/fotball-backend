@@ -145,6 +145,36 @@ app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) =
 app.get('/api/tournaments/:id/scoring-rules', async (req, res) => { try { res.json(await getTournamentRules(req.params.id)); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/admin/tournaments/:id/scoring-rules', auth, adminAuth, async (req, res) => { try { for(const [rt,pts] of Object.entries(req.body)) await pool.query('INSERT INTO tournament_scoring_rules(tournament_id,rule_type,points) VALUES($1,$2,$3) ON CONFLICT(tournament_id,rule_type) DO UPDATE SET points=$3',[req.params.id,rt,parseInt(pts)||0]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
+// Recalculate all scores for a tournament after rule changes
+app.post('/api/admin/tournaments/:id/recalculate', auth, adminAuth, async (req, res) => {
+  try {
+    const tid = req.params.id;
+    // Get all completed matches for this tournament
+    const matches = (await pool.query("SELECT * FROM matches WHERE tournament_id=$1 AND status='completed'", [tid])).rows;
+    let updated = 0;
+    // Reset user points first - we'll recompute
+    const userPointsMap = {};
+    for (const m of matches) {
+      const preds = (await pool.query('SELECT * FROM predictions WHERE match_id=$1', [m.id])).rows;
+      for (const p of preds) {
+        const oldPts = p.points_earned || 0;
+        const newPts = await calcPoints(p, m.team1_score, m.team2_score, tid);
+        if (oldPts !== newPts) {
+          await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2', [newPts, p.id]);
+          if (!userPointsMap[p.user_id]) userPointsMap[p.user_id] = 0;
+          userPointsMap[p.user_id] += (newPts - oldPts);
+          updated++;
+        }
+      }
+    }
+    // Update user total points
+    for (const [uid, diff] of Object.entries(userPointsMap)) {
+      await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2', [diff, uid]);
+    }
+    res.json({ message: `${updated} pronostics recalculés`, updated });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur: ' + e.message }); }
+});
+
 // Tournament Players
 app.get('/api/tournaments/:id/players', async (req, res) => { try { res.json((await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 ORDER BY t.name,tp.name',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.post('/api/tournaments/:id/players', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position}=req.body; res.json((await pool.query('INSERT INTO tournament_players(tournament_id,team_id,name,photo_url,position) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.id,team_id||null,name,photo_url||null,position||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
