@@ -243,25 +243,24 @@ app.post('/api/tournament-winner', auth, async (req, res) => { try { const {tour
 
 app.get('/api/tournaments/:id/started', async (req, res) => { try { const t=(await pool.query('SELECT has_started FROM tournaments WHERE id=$1',[req.params.id])).rows[0]; res.json({started:t?.has_started||false}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
-// Group standings for a tournament
+// Group standings + knockout bracket for a tournament
 app.get('/api/tournaments/:id/standings', async (req, res) => {
   try {
     const tid = req.params.id;
     const teams = (await pool.query(`SELECT tt.team_id, tt.group_name, t.name, t.flag_url
       FROM tournament_teams tt JOIN teams t ON tt.team_id=t.id WHERE tt.tournament_id=$1 ORDER BY tt.group_name,t.name`, [tid])).rows;
-    // Get ALL completed matches for this tournament
-    const matches = (await pool.query(`SELECT * FROM matches WHERE tournament_id=$1 AND status='completed'`, [tid])).rows;
+    const allMatches = (await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id WHERE m.tournament_id=$1 ORDER BY m.match_date`, [tid])).rows;
 
+    // --- GROUP STANDINGS ---
     const stats = {};
     teams.forEach(t => {
       stats[t.team_id] = { team_id: t.team_id, name: t.name, flag_url: t.flag_url, group_name: t.group_name,
         played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, gd: 0, points: 0 };
     });
 
-    matches.forEach(m => {
+    allMatches.filter(m => m.status === 'completed').forEach(m => {
       const t1 = stats[m.team1_id], t2 = stats[m.team2_id];
       if (!t1 || !t2) return;
-      // Only count if both teams are in the same group (group stage match)
       if (t1.group_name && t2.group_name && t1.group_name === t2.group_name) {
         t1.played++; t2.played++;
         t1.gf += m.team1_score; t1.ga += m.team2_score;
@@ -271,7 +270,6 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
         else { t1.drawn++; t2.drawn++; t1.points += 1; t2.points += 1; }
       }
     });
-
     Object.values(stats).forEach(s => { s.gd = s.gf - s.ga; });
 
     const groups = {};
@@ -282,7 +280,83 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     });
     Object.values(groups).forEach(arr => arr.sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf || a.name.localeCompare(b.name)));
 
-    res.json(groups);
+    // --- KNOCKOUT BRACKET ---
+    const knockoutStages = ['Huitièmes', 'Quarts', 'Demi-finales', '3ème place', 'Finale'];
+    const knockout = {};
+    allMatches.forEach(m => {
+      const stage = m.stage || '';
+      if (knockoutStages.some(ks => stage.toLowerCase().includes(ks.toLowerCase()) || ks.toLowerCase().includes(stage.toLowerCase()))) {
+        // Normalize stage name
+        const normalizedStage = knockoutStages.find(ks => stage.toLowerCase().includes(ks.toLowerCase()) || ks.toLowerCase().includes(stage.toLowerCase())) || stage;
+        if (!knockout[normalizedStage]) knockout[normalizedStage] = [];
+        knockout[normalizedStage].push({
+          id: m.id, team1_id: m.team1_id, team2_id: m.team2_id,
+          team1_name: m.team1_name, team2_name: m.team2_name,
+          team1_flag: m.team1_flag, team2_flag: m.team2_flag,
+          team1_score: m.team1_score, team2_score: m.team2_score,
+          status: m.status, stage: normalizedStage, match_date: m.match_date
+        });
+      }
+    });
+    // Sort knockout by stage order
+    const sortedKnockout = {};
+    knockoutStages.forEach(s => { if (knockout[s]) sortedKnockout[s] = knockout[s]; });
+
+    // --- ELIMINATION RANKING (Classement Éliminatoire) ---
+    // Ranks teams by how far they progressed: Finale winner=1st, loser=2nd, etc.
+    const stageRank = { 'Finale': 1, '3ème place': 2, 'Demi-finales': 3, 'Quarts': 5, 'Huitièmes': 9 };
+    const eliminationMap = {}; // team_id -> { rank, eliminated_at, name, flag_url }
+
+    // Process knockout from highest stage down
+    ['Finale', '3ème place', 'Demi-finales', 'Quarts', 'Huitièmes'].forEach(stage => {
+      const stageMatches = (knockout[stage] || []).filter(m => m.status === 'completed');
+      stageMatches.forEach(m => {
+        const t1Won = m.team1_score > m.team2_score;
+        const t2Won = m.team2_score > m.team1_score;
+        const winnerId = t1Won ? m.team1_id : t2Won ? m.team2_id : null;
+        const loserId = t1Won ? m.team2_id : t2Won ? m.team1_id : null;
+
+        if (stage === 'Finale') {
+          if (winnerId && !eliminationMap[winnerId]) eliminationMap[winnerId] = { rank: 1, stage: '🥇 Vainqueur', name: t1Won ? m.team1_name : m.team2_name, flag_url: t1Won ? m.team1_flag : m.team2_flag };
+          if (loserId && !eliminationMap[loserId]) eliminationMap[loserId] = { rank: 2, stage: '🥈 Finaliste', name: t1Won ? m.team2_name : m.team1_name, flag_url: t1Won ? m.team2_flag : m.team1_flag };
+        } else if (stage === '3ème place') {
+          if (winnerId && !eliminationMap[winnerId]) eliminationMap[winnerId] = { rank: 3, stage: '🥉 3ème place', name: t1Won ? m.team1_name : m.team2_name, flag_url: t1Won ? m.team1_flag : m.team2_flag };
+          if (loserId && !eliminationMap[loserId]) eliminationMap[loserId] = { rank: 4, stage: '4ème place', name: t1Won ? m.team2_name : m.team1_name, flag_url: t1Won ? m.team2_flag : m.team1_flag };
+        } else {
+          // For other stages, losers are eliminated at that stage
+          const baseRank = stageRank[stage] || 99;
+          if (loserId && !eliminationMap[loserId]) {
+            eliminationMap[loserId] = { rank: baseRank, stage: `Éliminé en ${stage}`, name: t1Won ? m.team2_name : m.team1_name, flag_url: t1Won ? m.team2_flag : m.team1_flag };
+          }
+        }
+      });
+    });
+
+    // Add group stage eliminated teams (those not in any knockout match)
+    const knockoutTeamIds = new Set();
+    Object.values(knockout).forEach(stageMatches => {
+      stageMatches.forEach(m => { knockoutTeamIds.add(m.team1_id); knockoutTeamIds.add(m.team2_id); });
+    });
+
+    const groupEliminated = Object.values(stats)
+      .filter(t => !knockoutTeamIds.has(t.team_id) && t.played > 0)
+      .sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf)
+      .map(t => ({ rank: 99, stage: `Éliminé en Groupes (${t.group_name})`, name: t.name, flag_url: t.flag_url, group_points: t.points, group_gd: t.gd }));
+
+    // Build final sorted elimination ranking
+    const eliminationRanking = [
+      ...Object.values(eliminationMap).sort((a, b) => a.rank - b.rank),
+      ...groupEliminated
+    ];
+
+    // Assign final positions
+    let pos = 1;
+    eliminationRanking.forEach((entry, i) => {
+      if (i > 0 && entry.rank !== eliminationRanking[i - 1].rank) pos = i + 1;
+      entry.position = pos;
+    });
+
+    res.json({ groups, knockout: sortedKnockout, elimination: eliminationRanking });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
 });
 
