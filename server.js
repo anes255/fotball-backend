@@ -62,7 +62,7 @@ const initDB = async () => {
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
-  const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['best_player',7],['best_goal_scorer',7]];
+  const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['tournament_runner_up',5],['best_player',7],['best_goal_scorer',7]];
   for (const [t,p] of rules) await pool.query('INSERT INTO scoring_rules(rule_type,points) VALUES($1,$2) ON CONFLICT DO NOTHING',[t,p]);
 
   const defaults = [
@@ -302,61 +302,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     const sortedKnockout = {};
     knockoutStages.forEach(s => { if (knockout[s]) sortedKnockout[s] = knockout[s]; });
 
-    // --- ELIMINATION RANKING (Classement Éliminatoire) ---
-    // Ranks teams by how far they progressed: Finale winner=1st, loser=2nd, etc.
-    const stageRank = { 'Finale': 1, '3ème place': 2, 'Demi-finales': 3, 'Quarts': 5, 'Huitièmes': 9 };
-    const eliminationMap = {}; // team_id -> { rank, eliminated_at, name, flag_url }
-
-    // Process knockout from highest stage down
-    ['Finale', '3ème place', 'Demi-finales', 'Quarts', 'Huitièmes'].forEach(stage => {
-      const stageMatches = (knockout[stage] || []).filter(m => m.status === 'completed');
-      stageMatches.forEach(m => {
-        const t1Won = m.team1_score > m.team2_score;
-        const t2Won = m.team2_score > m.team1_score;
-        const winnerId = t1Won ? m.team1_id : t2Won ? m.team2_id : null;
-        const loserId = t1Won ? m.team2_id : t2Won ? m.team1_id : null;
-
-        if (stage === 'Finale') {
-          if (winnerId && !eliminationMap[winnerId]) eliminationMap[winnerId] = { rank: 1, stage: '🥇 Vainqueur', name: t1Won ? m.team1_name : m.team2_name, flag_url: t1Won ? m.team1_flag : m.team2_flag };
-          if (loserId && !eliminationMap[loserId]) eliminationMap[loserId] = { rank: 2, stage: '🥈 Finaliste', name: t1Won ? m.team2_name : m.team1_name, flag_url: t1Won ? m.team2_flag : m.team1_flag };
-        } else if (stage === '3ème place') {
-          if (winnerId && !eliminationMap[winnerId]) eliminationMap[winnerId] = { rank: 3, stage: '🥉 3ème place', name: t1Won ? m.team1_name : m.team2_name, flag_url: t1Won ? m.team1_flag : m.team2_flag };
-          if (loserId && !eliminationMap[loserId]) eliminationMap[loserId] = { rank: 4, stage: '4ème place', name: t1Won ? m.team2_name : m.team1_name, flag_url: t1Won ? m.team2_flag : m.team1_flag };
-        } else {
-          // For other stages, losers are eliminated at that stage
-          const baseRank = stageRank[stage] || 99;
-          if (loserId && !eliminationMap[loserId]) {
-            eliminationMap[loserId] = { rank: baseRank, stage: `Éliminé en ${stage}`, name: t1Won ? m.team2_name : m.team1_name, flag_url: t1Won ? m.team2_flag : m.team1_flag };
-          }
-        }
-      });
-    });
-
-    // Add group stage eliminated teams (those not in any knockout match)
-    const knockoutTeamIds = new Set();
-    Object.values(knockout).forEach(stageMatches => {
-      stageMatches.forEach(m => { knockoutTeamIds.add(m.team1_id); knockoutTeamIds.add(m.team2_id); });
-    });
-
-    const groupEliminated = Object.values(stats)
-      .filter(t => !knockoutTeamIds.has(t.team_id) && t.played > 0)
-      .sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf)
-      .map(t => ({ rank: 99, stage: `Éliminé en Groupes (${t.group_name})`, name: t.name, flag_url: t.flag_url, group_points: t.points, group_gd: t.gd }));
-
-    // Build final sorted elimination ranking
-    const eliminationRanking = [
-      ...Object.values(eliminationMap).sort((a, b) => a.rank - b.rank),
-      ...groupEliminated
-    ];
-
-    // Assign final positions
-    let pos = 1;
-    eliminationRanking.forEach((entry, i) => {
-      if (i > 0 && entry.rank !== eliminationRanking[i - 1].rank) pos = i + 1;
-      entry.position = pos;
-    });
-
-    res.json({ groups, knockout: sortedKnockout, elimination: eliminationRanking });
+    res.json({ groups, knockout: sortedKnockout });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
 });
 
@@ -414,7 +360,7 @@ app.get('/api/settings', async (req, res) => { try { const s={}; (await pool.que
 app.put('/api/admin/settings', auth, adminAuth, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2',[k,v]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.post('/api/admin/tournaments/:id/start', auth, adminAuth, async (req, res) => { try { await pool.query('UPDATE tournaments SET has_started=true WHERE id=$1',[req.params.id]); res.json({message:'Tournoi démarré !'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const rules=await getTournamentRules(tournament_id); const pts=rules.tournament_winner||10; const winners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2',[tournament_id,team_id])).rows; for(const w of winners){await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[pts,tournament_id,w.user_id]); await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,w.user_id]);} await pool.query('UPDATE tournaments SET is_active=false,has_started=true WHERE id=$1',[tournament_id]); res.json({message:`${winners.length} utilisateurs récompensés. Tournoi terminé !`}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => { try { const {tournament_id,team_id,runner_up_team_id}=req.body; const rules=await getTournamentRules(tournament_id); const pts=rules.tournament_winner||10; const runnerPts=rules.tournament_runner_up||5; let totalRewarded=0; const winners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2',[tournament_id,team_id])).rows; for(const w of winners){await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[pts,tournament_id,w.user_id]); await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,w.user_id]);} totalRewarded+=winners.length; if(runner_up_team_id && runnerPts>0){ const runners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2 AND points_earned=0',[tournament_id,runner_up_team_id])).rows; for(const r of runners){await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[runnerPts,tournament_id,r.user_id]); await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[runnerPts,r.user_id]);} totalRewarded+=runners.length;} await pool.query('UPDATE tournaments SET is_active=false,has_started=true WHERE id=$1',[tournament_id]); res.json({message:`${totalRewarded} utilisateurs récompensés (${winners.length} vainqueur, ${runner_up_team_id?totalRewarded-winners.length:0} finaliste). Tournoi terminé !`}); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
 
 const PORT = process.env.PORT || 3000;
 (async () => { try { await pool.query('SELECT 1'); console.log('✓ DB connected'); await initDB(); const hash=await bcrypt.hash('password',10); await pool.query('INSERT INTO users(name,phone,password,is_admin) VALUES($1,$2,$3,$4) ON CONFLICT(phone) DO UPDATE SET password=$3',['Admin','0665448641',hash,true]); app.listen(PORT,()=>console.log(`🚀 Server on port ${PORT}`)); } catch(e) { console.error('Error:',e); process.exit(1); }})();
