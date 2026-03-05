@@ -181,7 +181,13 @@ app.post('/api/admin/tournaments/:id/recalculate', auth, adminAuth, async (req, 
 
 // Tournament Players
 app.get('/api/tournaments/:id/players', async (req, res) => { try { res.json((await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 ORDER BY t.name,tp.name',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+// Get ALL players across all tournaments (for reuse)
+app.get('/api/players/all', async (req, res) => { try { res.json((await pool.query('SELECT DISTINCT ON (tp.name, tp.team_id) tp.id, tp.name, tp.team_id, tp.photo_url, tp.position, t.name as team_name, t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id ORDER BY tp.name, tp.team_id, tp.id DESC')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+// Get players for a specific team (across all tournaments)
+app.get('/api/teams/:id/players', async (req, res) => { try { res.json((await pool.query('SELECT DISTINCT ON (tp.name) tp.id, tp.name, tp.team_id, tp.photo_url, tp.position, t.name as team_name, t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.team_id=$1 ORDER BY tp.name, tp.id DESC',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.post('/api/tournaments/:id/players', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position}=req.body; res.json((await pool.query('INSERT INTO tournament_players(tournament_id,team_id,name,photo_url,position) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.id,team_id||null,name,photo_url||null,position||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+// Import player from another tournament
+app.post('/api/tournaments/:id/players/import', auth, adminAuth, async (req, res) => { try { const {player_id}=req.body; const src=(await pool.query('SELECT name,team_id,photo_url,position FROM tournament_players WHERE id=$1',[player_id])).rows[0]; if(!src) return res.status(404).json({error:'Joueur non trouvé'}); const existing=(await pool.query('SELECT id FROM tournament_players WHERE tournament_id=$1 AND name=$2 AND team_id=$3',[req.params.id,src.name,src.team_id])).rows[0]; if(existing) return res.status(400).json({error:'Joueur déjà dans ce tournoi'}); res.json((await pool.query('INSERT INTO tournament_players(tournament_id,team_id,name,photo_url,position) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.id,src.team_id,src.name,src.photo_url,src.position])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/players/:id', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position}=req.body; res.json((await pool.query('UPDATE tournament_players SET name=$1,team_id=$2,photo_url=$3,position=$4 WHERE id=$5 RETURNING *',[name,team_id||null,photo_url||null,position||null,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/players/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM tournament_players WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
@@ -229,52 +235,77 @@ app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
   } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
 
-// Bracket generation
+// Bracket generation - supports any number of teams (3-32) with byes
 app.post('/api/admin/tournaments/:id/generate-bracket', auth, adminAuth, async (req, res) => {
   try {
     const tid=req.params.id;
     const {team_ids, include_third_place}=req.body;
-    if(!team_ids||!team_ids.length) return res.status(400).json({error:'Sélectionnez des équipes'});
+    if(!team_ids||team_ids.length<3) return res.status(400).json({error:'Minimum 3 équipes'});
+    if(team_ids.length>32) return res.status(400).json({error:'Maximum 32 équipes'});
     const n=team_ids.length;
-    if(![4,8,16,32].includes(n)) return res.status(400).json({error:"Le nombre d'équipes doit être 4, 8, 16 ou 32"});
+    // Round up to next power of 2
+    let bracketSize=4; while(bracketSize<n) bracketSize*=2;
+    const numByes=bracketSize-n;
     await pool.query('DELETE FROM predictions WHERE match_id IN (SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round IS NOT NULL)',[tid]);
     await pool.query('DELETE FROM matches WHERE tournament_id=$1 AND bracket_round IS NOT NULL',[tid]);
-    const stageNames={32:'32èmes',16:'Huitièmes',8:'Quarts',4:'Demi-finales',2:'Finale',3:'3ème place'};
+    const stNames={32:'32èmes',16:'Huitièmes',8:'Quarts',4:'Demi-finales',2:'Finale',3:'3ème place'};
     const defaultDate=new Date();defaultDate.setDate(defaultDate.getDate()+7);
     const createdByRound={};
-    const finalM=(await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position) VALUES($1,NULL,NULL,$2,$3,$4,0,0,$5,$6) RETURNING id',[tid,defaultDate,stageNames[2],'upcoming',2,1])).rows[0];
+    // Create final
+    const finalM=(await pool.query('INSERT INTO matches(tournament_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position) VALUES($1,$2,$3,$4,0,0,$5,$6) RETURNING id',[tid,defaultDate,stNames[2],'upcoming',2,1])).rows[0];
     createdByRound[2]=[finalM.id];
+    // 3rd place
     let thirdId=null;
     if(include_third_place){
-      const thirdM=(await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position) VALUES($1,NULL,NULL,$2,$3,$4,0,0,$5,$6) RETURNING id',[tid,defaultDate,'3ème place','upcoming',3,1])).rows[0];
+      const thirdM=(await pool.query('INSERT INTO matches(tournament_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position) VALUES($1,$2,$3,$4,0,0,$5,$6) RETURNING id',[tid,defaultDate,'3ème place','upcoming',3,1])).rows[0];
       thirdId=thirdM.id;createdByRound[3]=[thirdId];
     }
-    if(n>=4){
+    // Create semi-finals
+    if(bracketSize>=4){
       const sfIds=[];
       for(let p=1;p<=2;p++){
-        const m=(await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position,next_match_id,next_match_slot) VALUES($1,NULL,NULL,$2,$3,$4,0,0,$5,$6,$7,$8) RETURNING id',[tid,defaultDate,stageNames[4],'upcoming',4,p,finalM.id,p])).rows[0];
+        const m=(await pool.query('INSERT INTO matches(tournament_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position,next_match_id,next_match_slot) VALUES($1,$2,$3,$4,0,0,$5,$6,$7,$8) RETURNING id',[tid,defaultDate,stNames[4],'upcoming',4,p,finalM.id,p])).rows[0];
         sfIds.push(m.id);
       }
       createdByRound[4]=sfIds;
-      if(thirdId){for(let p=0;p<2;p++) await pool.query('UPDATE matches SET next_match_id=CASE WHEN next_match_id IS NULL THEN $1 ELSE next_match_id END WHERE id=$2',[thirdId,sfIds[p]]);}
     }
+    // Create deeper rounds
     let prevRound=4;
-    for(let round=8;round<=n;round*=2){
+    for(let round=8;round<=bracketSize;round*=2){
       const parentIds=createdByRound[prevRound];
       const roundIds=[];const matchCount=round/2;
       for(let p=1;p<=matchCount;p++){
         const parentIdx=Math.ceil(p/2)-1;const nextId=parentIds[parentIdx];const nextSlot=((p-1)%2)+1;
-        const m=(await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position,next_match_id,next_match_slot) VALUES($1,NULL,NULL,$2,$3,$4,0,0,$5,$6,$7,$8) RETURNING id',[tid,defaultDate,stageNames[round]||('Tour '+round),'upcoming',round,p,nextId,nextSlot])).rows[0];
+        const m=(await pool.query('INSERT INTO matches(tournament_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position,next_match_id,next_match_slot) VALUES($1,$2,$3,$4,0,0,$5,$6,$7,$8) RETURNING id',[tid,defaultDate,stNames[round]||('Tour '+round),'upcoming',round,p,nextId,nextSlot])).rows[0];
         roundIds.push(m.id);
       }
       createdByRound[round]=roundIds;prevRound=round;
     }
-    const firstRound=n;const firstRoundIds=createdByRound[firstRound];
+    // Place teams with byes - top seeds get byes
+    // Seeding: 1v(last), 2v(last-1), etc. Byes go to top seeds
+    const firstRound=bracketSize;const firstRoundIds=createdByRound[firstRound];
+    // Build seed positions: classic bracket seeding
+    const seeds=[];
+    for(let i=0;i<bracketSize/2;i++){seeds.push([i*2, i*2+1]);}
+    // Place teams - positions beyond n get null (bye)
     for(let i=0;i<team_ids.length;i++){
       const matchIdx=Math.floor(i/2);const slot=i%2===0?'team1_id':'team2_id';
       await pool.query(`UPDATE matches SET ${slot}=$1 WHERE id=$2`,[team_ids[i],firstRoundIds[matchIdx]]);
     }
-    res.json({message:'Bracket '+n+' équipes créé',rounds:createdByRound});
+    // Auto-advance byes: matches where one team is null auto-advance the other
+    const firstRoundMatches=(await pool.query('SELECT id,team1_id,team2_id,next_match_id,next_match_slot FROM matches WHERE id=ANY($1)',[firstRoundIds])).rows;
+    for(const m of firstRoundMatches){
+      if(m.team1_id && !m.team2_id){
+        // Team1 gets a bye - auto advance
+        await pool.query("UPDATE matches SET status='completed',team1_score=0,team2_score=0 WHERE id=$1",[m.id]);
+        if(m.next_match_id){const sl=m.next_match_slot===2?'team2_id':'team1_id';await pool.query(`UPDATE matches SET ${sl}=$1 WHERE id=$2`,[m.team1_id,m.next_match_id]);}
+      } else if(!m.team1_id && !m.team2_id){
+        // Empty match - just mark completed
+        await pool.query("UPDATE matches SET status='completed' WHERE id=$1",[m.id]);
+      }
+    }
+    const total=Object.values(createdByRound).reduce((s,r)=>s+r.length,0);
+    res.json({message:`Bracket ${n} équipes créé (${numByes} bye${numByes>1?'s':''})`,rounds:createdByRound});
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur: '+e.message}); }
 });
 
@@ -312,9 +343,9 @@ app.get('/api/users/:id/predictions', async (req, res) => {
 
 // Tournament winner
 app.get('/api/tournament-winner/:tournamentId', auth, async (req, res) => { try { res.json((await pool.query('SELECT twp.*,t.name as team_name,t.flag_url FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id WHERE twp.user_id=$1 AND twp.tournament_id=$2',[req.userId,req.params.tournamentId])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/tournament-winner', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const t=(await pool.query('SELECT has_started FROM tournaments WHERE id=$1',[tournament_id])).rows[0]; if(t?.has_started) return res.status(400).json({error:'Tournoi déjà commencé'}); res.json((await pool.query('INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) ON CONFLICT(user_id,tournament_id) DO UPDATE SET team_id=$3 RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/tournament-winner', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const finalMatch=(await pool.query("SELECT id,status FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tournament_id])).rows[0]; if(finalMatch) return res.status(400).json({error:'La finale a commencé, prédictions fermées'}); const existing=(await pool.query('SELECT id FROM tournament_winner_predictions WHERE user_id=$1 AND tournament_id=$2',[req.userId,tournament_id])).rows[0]; if(existing) return res.status(400).json({error:'Vous avez déjà confirmé votre prédiction. Impossible de la modifier.'}); res.json((await pool.query('INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
-app.get('/api/tournaments/:id/started', async (req, res) => { try { const tid=req.params.id; const t=(await pool.query('SELECT has_started FROM tournaments WHERE id=$1',[tid])).rows[0]; const hasCompleted=(await pool.query('SELECT 1 FROM matches WHERE tournament_id=$1 AND status=$2 LIMIT 1',[tid,'completed'])).rows.length>0; res.json({started:t?.has_started||false,hasCompletedMatch:hasCompleted}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/tournaments/:id/started', async (req, res) => { try { const tid=req.params.id; const t=(await pool.query('SELECT has_started FROM tournaments WHERE id=$1',[tid])).rows[0]; const hasCompleted=(await pool.query('SELECT 1 FROM matches WHERE tournament_id=$1 AND status=$2 LIMIT 1',[tid,'completed'])).rows.length>0; const hasFinalStarted=(await pool.query("SELECT 1 FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tid])).rows.length>0; res.json({started:t?.has_started||false,hasCompletedMatch:hasCompleted,hasFinalStarted}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Group standings + knockout bracket for a tournament
 app.get('/api/tournaments/:id/standings', async (req, res) => {
