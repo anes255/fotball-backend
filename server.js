@@ -23,10 +23,18 @@ const auth = async (req, res, next) => {
 
 const adminAuth = async (req, res, next) => {
   try {
-    const r = await pool.query('SELECT is_admin FROM users WHERE id=$1', [req.userId]);
-    if (!r.rows[0]?.is_admin) return res.status(403).json({ error: 'Admin requis' });
+    const r = await pool.query('SELECT is_admin, is_employee FROM users WHERE id=$1', [req.userId]);
+    if (!r.rows[0]?.is_admin && !r.rows[0]?.is_employee) return res.status(403).json({ error: 'Accès requis' });
+    req.isAdmin = r.rows[0]?.is_admin || false;
+    req.isEmployee = r.rows[0]?.is_employee || false;
     next();
   } catch (e) { res.status(500).json({ error: 'Erreur serveur' }); }
+};
+
+// Strict admin only - for destructive actions
+const strictAdmin = async (req, res, next) => {
+  if (!req.isAdmin) return res.status(403).json({ error: 'Admin requis' });
+  next();
 };
 
 const initDB = async () => {
@@ -59,6 +67,7 @@ const initDB = async () => {
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS max_teams INTEGER DEFAULT 32',
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS has_started BOOLEAN DEFAULT FALSE',
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS enable_player_predictions BOOLEAN DEFAULT FALSE',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS is_employee BOOLEAN DEFAULT FALSE',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS bracket_round INTEGER',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS bracket_position INTEGER',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS next_match_id INTEGER',
@@ -119,8 +128,8 @@ app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '4.
 
 // Auth
 app.post('/api/auth/register', async (req, res) => { try { const {name,phone,password}=req.body||{}; if(!name||!phone||!password) return res.status(400).json({error:'Champs requis'}); const clean=phone.replace(/[\s-]/g,''); if(!/^(05|06|07)\d{8}$/.test(clean)) return res.status(400).json({error:'Numéro invalide'}); if((await pool.query('SELECT id FROM users WHERE phone=$1',[clean])).rows.length) return res.status(400).json({error:'Numéro déjà utilisé'}); const r=await pool.query('INSERT INTO users(name,phone,password) VALUES($1,$2,$3) RETURNING *',[name,clean,await bcrypt.hash(password,10)]); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:r.rows[0]}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
-app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=req.body||{}; const clean=phone?.replace(/[\s-]/g,''); const r=await pool.query('SELECT * FROM users WHERE phone=$1',[clean]); if(!r.rows[0]||!(await bcrypt.compare(password,r.rows[0].password))) return res.status(401).json({error:'Identifiants incorrects'}); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{id:r.rows[0].id,name:r.rows[0].name,phone:r.rows[0].phone,is_admin:r.rows[0].is_admin,total_points:r.rows[0].total_points||0}}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
-app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,total_points FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=req.body||{}; const clean=phone?.replace(/[\s-]/g,''); const r=await pool.query('SELECT * FROM users WHERE phone=$1',[clean]); if(!r.rows[0]||!(await bcrypt.compare(password,r.rows[0].password))) return res.status(401).json({error:'Identifiants incorrects'}); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{id:r.rows[0].id,name:r.rows[0].name,phone:r.rows[0].phone,is_admin:r.rows[0].is_admin,is_employee:r.rows[0].is_employee||false,total_points:r.rows[0].total_points||0}}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
+app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Teams
 app.get('/api/teams', async (req, res) => { try { res.json((await pool.query('SELECT * FROM teams ORDER BY name')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -195,7 +204,7 @@ app.post('/api/tournaments/:id/players/import', auth, adminAuth, async (req, res
 app.put('/api/players/:id', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position,goals}=req.body; res.json((await pool.query('UPDATE tournament_players SET name=$1,team_id=$2,photo_url=$3,position=$4,goals=COALESCE($5,goals) WHERE id=$6 RETURNING *',[name,team_id||null,photo_url||null,position||null,goals!=null?goals:null,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 // Update just goals for a player
 app.put('/api/players/:id/goals', auth, adminAuth, async (req, res) => { try { const {goals}=req.body; res.json((await pool.query('UPDATE tournament_players SET goals=$1 WHERE id=$2 RETURNING *',[goals||0,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.delete('/api/players/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM tournament_players WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.delete('/api/players/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM tournament_players WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Goalscorer ranking for a tournament
 app.get('/api/tournaments/:id/goalscorers', async (req, res) => { try { res.json((await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 AND tp.goals>0 ORDER BY tp.goals DESC,tp.name',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -468,16 +477,16 @@ app.get('/api/daily-winners', async (req, res) => {
 });
 
 // Admin
-app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,total_points,created_at FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/admin/users/:id', auth, adminAuth, async (req, res) => { try { const {is_admin,total_points}=req.body; res.json((await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),total_points=COALESCE($2,total_points) WHERE id=$3 RETURNING *',[is_admin,total_points,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.delete('/api/admin/users/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM users WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,created_at FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { const {is_admin,is_employee,total_points}=req.body; res.json((await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),is_employee=COALESCE($2,is_employee),total_points=COALESCE($3,total_points) WHERE id=$4 RETURNING *',[is_admin,is_employee,total_points,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.delete('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM users WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2',[v,k]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2',[v,k]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.get('/api/settings', async (req, res) => { try { const s={}; (await pool.query('SELECT * FROM site_settings')).rows.forEach(r=>s[r.setting_key]=r.setting_value); res.json(s); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/admin/settings', auth, adminAuth, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2',[k,v]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/admin/settings', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2',[k,v]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.post('/api/admin/tournaments/:id/start', auth, adminAuth, async (req, res) => { try { await pool.query('UPDATE tournaments SET has_started=true WHERE id=$1',[req.params.id]); res.json({message:'Tournoi démarré !'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => {
+app.post('/api/admin/award-winner', auth, adminAuth, strictAdmin, async (req, res) => {
   try {
     const {tournament_id,team_id,runner_up_team_id}=req.body;
     const rules=await getTournamentRules(tournament_id);
