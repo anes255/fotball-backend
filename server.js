@@ -63,10 +63,14 @@ const initDB = async () => {
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS bracket_position INTEGER',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS next_match_id INTEGER',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS next_match_slot INTEGER',
+    'ALTER TABLE tournament_players ADD COLUMN IF NOT EXISTS goals INTEGER DEFAULT 0',
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
-  const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['tournament_runner_up',5],['best_player',7],['best_goal_scorer',7]];
+  // Finalist predictions table
+  try { await pool.query('CREATE TABLE IF NOT EXISTS finalist_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))'); } catch(e) {}
+
+  const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['tournament_runner_up',5],['tournament_finalist',3],['best_player',7],['best_goal_scorer',7]];
   for (const [t,p] of rules) await pool.query('INSERT INTO scoring_rules(rule_type,points) VALUES($1,$2) ON CONFLICT DO NOTHING',[t,p]);
 
   const defaults = [
@@ -188,8 +192,17 @@ app.get('/api/teams/:id/players', async (req, res) => { try { res.json((await po
 app.post('/api/tournaments/:id/players', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position}=req.body; res.json((await pool.query('INSERT INTO tournament_players(tournament_id,team_id,name,photo_url,position) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.id,team_id||null,name,photo_url||null,position||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 // Import player from another tournament
 app.post('/api/tournaments/:id/players/import', auth, adminAuth, async (req, res) => { try { const {player_id}=req.body; const src=(await pool.query('SELECT name,team_id,photo_url,position FROM tournament_players WHERE id=$1',[player_id])).rows[0]; if(!src) return res.status(404).json({error:'Joueur non trouvé'}); const existing=(await pool.query('SELECT id FROM tournament_players WHERE tournament_id=$1 AND name=$2 AND team_id=$3',[req.params.id,src.name,src.team_id])).rows[0]; if(existing) return res.status(400).json({error:'Joueur déjà dans ce tournoi'}); res.json((await pool.query('INSERT INTO tournament_players(tournament_id,team_id,name,photo_url,position) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.id,src.team_id,src.name,src.photo_url,src.position])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/players/:id', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position}=req.body; res.json((await pool.query('UPDATE tournament_players SET name=$1,team_id=$2,photo_url=$3,position=$4 WHERE id=$5 RETURNING *',[name,team_id||null,photo_url||null,position||null,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/players/:id', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position,goals}=req.body; res.json((await pool.query('UPDATE tournament_players SET name=$1,team_id=$2,photo_url=$3,position=$4,goals=COALESCE($5,goals) WHERE id=$6 RETURNING *',[name,team_id||null,photo_url||null,position||null,goals!=null?goals:null,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+// Update just goals for a player
+app.put('/api/players/:id/goals', auth, adminAuth, async (req, res) => { try { const {goals}=req.body; res.json((await pool.query('UPDATE tournament_players SET goals=$1 WHERE id=$2 RETURNING *',[goals||0,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/players/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM tournament_players WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+
+// Goalscorer ranking for a tournament
+app.get('/api/tournaments/:id/goalscorers', async (req, res) => { try { res.json((await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 AND tp.goals>0 ORDER BY tp.goals DESC,tp.name',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+
+// Finalist predictions (predict team that reaches the final)
+app.get('/api/finalist/:tournamentId', auth, async (req, res) => { try { res.json((await pool.query('SELECT fp.*,t.name as team_name,t.flag_url FROM finalist_predictions fp JOIN teams t ON fp.team_id=t.id WHERE fp.user_id=$1 AND fp.tournament_id=$2',[req.userId,req.params.tournamentId])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/finalist', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const finalMatch=(await pool.query("SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tournament_id])).rows[0]; if(finalMatch) return res.status(400).json({error:'La finale a commencé'}); const existing=(await pool.query('SELECT id FROM finalist_predictions WHERE user_id=$1 AND tournament_id=$2',[req.userId,tournament_id])).rows[0]; if(existing) return res.status(400).json({error:'Prédiction déjà confirmée'}); res.json((await pool.query('INSERT INTO finalist_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Player predictions
 app.get('/api/tournaments/:id/my-player-prediction', auth, async (req, res) => { try { res.json((await pool.query('SELECT pp.*,bp.name as best_player_name,bp.photo_url as best_player_photo,bp.position as best_player_position,bpt.name as best_player_team,bpt.flag_url as best_player_team_flag,gs.name as best_goal_scorer_name,gs.photo_url as best_goal_scorer_photo,gs.position as best_goal_scorer_position,gst.name as best_goal_scorer_team,gst.flag_url as best_goal_scorer_team_flag FROM player_predictions pp LEFT JOIN tournament_players bp ON pp.best_player_id=bp.id LEFT JOIN teams bpt ON bp.team_id=bpt.id LEFT JOIN tournament_players gs ON pp.best_goal_scorer_id=gs.id LEFT JOIN teams gst ON gs.team_id=gst.id WHERE pp.user_id=$1 AND pp.tournament_id=$2',[req.userId,req.params.id])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -464,7 +477,50 @@ app.get('/api/settings', async (req, res) => { try { const s={}; (await pool.que
 app.put('/api/admin/settings', auth, adminAuth, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2',[k,v]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.post('/api/admin/tournaments/:id/start', auth, adminAuth, async (req, res) => { try { await pool.query('UPDATE tournaments SET has_started=true WHERE id=$1',[req.params.id]); res.json({message:'Tournoi démarré !'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => { try { const {tournament_id,team_id,runner_up_team_id}=req.body; const rules=await getTournamentRules(tournament_id); const pts=rules.tournament_winner||10; const runnerPts=rules.tournament_runner_up||5; let totalRewarded=0; const winners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2',[tournament_id,team_id])).rows; for(const w of winners){await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[pts,tournament_id,w.user_id]); await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,w.user_id]);} totalRewarded+=winners.length; if(runner_up_team_id && runnerPts>0){ const runners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2 AND points_earned=0',[tournament_id,runner_up_team_id])).rows; for(const r of runners){await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[runnerPts,tournament_id,r.user_id]); await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[runnerPts,r.user_id]);} totalRewarded+=runners.length;} await pool.query('UPDATE tournaments SET is_active=false,has_started=true WHERE id=$1',[tournament_id]); res.json({message:`${totalRewarded} utilisateurs récompensés (${winners.length} vainqueur, ${runner_up_team_id?totalRewarded-winners.length:0} finaliste). Tournoi terminé !`}); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+app.post('/api/admin/award-winner', auth, adminAuth, async (req, res) => {
+  try {
+    const {tournament_id,team_id,runner_up_team_id}=req.body;
+    const rules=await getTournamentRules(tournament_id);
+    const pts=rules.tournament_winner||10;
+    const runnerPts=rules.tournament_runner_up||5;
+    const finalistPts=rules.tournament_finalist||3;
+    let totalRewarded=0;
+    // Winner predictions
+    const winnerUserIds=new Set();
+    const winners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2',[tournament_id,team_id])).rows;
+    for(const w of winners){
+      await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[pts,tournament_id,w.user_id]);
+      await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,w.user_id]);
+      winnerUserIds.add(w.user_id);
+    }
+    totalRewarded+=winners.length;
+    // Runner-up predictions (exclude users who already won)
+    if(runner_up_team_id && runnerPts>0){
+      const runners=(await pool.query('SELECT user_id FROM tournament_winner_predictions WHERE tournament_id=$1 AND team_id=$2 AND points_earned=0',[tournament_id,runner_up_team_id])).rows;
+      for(const r of runners){
+        await pool.query('UPDATE tournament_winner_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[runnerPts,tournament_id,r.user_id]);
+        await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[runnerPts,r.user_id]);
+      }
+      totalRewarded+=runners.length;
+    }
+    // Finalist predictions - both finalists qualify (winner + runner_up)
+    // Users who predicted either finalist team get points, BUT NOT if they already got winner points
+    let finalistCount=0;
+    const finalistTeams=[team_id];
+    if(runner_up_team_id) finalistTeams.push(runner_up_team_id);
+    for(const fTeam of finalistTeams){
+      const fps=(await pool.query('SELECT user_id FROM finalist_predictions WHERE tournament_id=$1 AND team_id=$2 AND points_earned=0',[tournament_id,fTeam])).rows;
+      for(const f of fps){
+        if(winnerUserIds.has(f.user_id)) continue; // Skip: winner pts are higher
+        await pool.query('UPDATE finalist_predictions SET points_earned=$1 WHERE tournament_id=$2 AND user_id=$3',[finalistPts,tournament_id,f.user_id]);
+        await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[finalistPts,f.user_id]);
+        finalistCount++;
+      }
+    }
+    await pool.query('UPDATE tournaments SET is_active=false,has_started=true WHERE id=$1',[tournament_id]);
+    res.json({message:`${totalRewarded+finalistCount} récompensés (${winners.length} vainqueur, ${runner_up_team_id?totalRewarded-winners.length:0} finaliste, ${finalistCount} prédiction finale). Tournoi terminé !`});
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
 
 const PORT = process.env.PORT || 3000;
 (async () => { try { await pool.query('SELECT 1'); console.log('✓ DB connected'); await initDB(); const hash=await bcrypt.hash('password',10); await pool.query('INSERT INTO users(name,phone,password,is_admin) VALUES($1,$2,$3,$4) ON CONFLICT(phone) DO UPDATE SET password=$3',['Admin','0665448641',hash,true]); app.listen(PORT,()=>console.log(`🚀 Server on port ${PORT}`)); } catch(e) { console.error('Error:',e); process.exit(1); }})();
