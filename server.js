@@ -51,6 +51,7 @@ const initDB = async () => {
     `CREATE TABLE IF NOT EXISTS tournament_winner_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
     `CREATE TABLE IF NOT EXISTS tournament_players (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL, name VARCHAR(255) NOT NULL, photo_url TEXT, position VARCHAR(100))`,
     `CREATE TABLE IF NOT EXISTS player_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, best_player_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, best_goal_scorer_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
+    `CREATE TABLE IF NOT EXISTS goal_events (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, minute INTEGER, created_at TIMESTAMP DEFAULT NOW())`,
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
@@ -204,6 +205,42 @@ app.post('/api/tournaments/:id/players/import', auth, adminAuth, async (req, res
 app.put('/api/players/:id', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position,goals}=req.body; res.json((await pool.query('UPDATE tournament_players SET name=$1,team_id=$2,photo_url=$3,position=$4,goals=COALESCE($5,goals) WHERE id=$6 RETURNING *',[name,team_id||null,photo_url||null,position||null,goals!=null?goals:null,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 // Update just goals for a player
 app.put('/api/players/:id/goals', auth, adminAuth, async (req, res) => { try { const {goals}=req.body; res.json((await pool.query('UPDATE tournament_players SET goals=$1 WHERE id=$2 RETURNING *',[goals||0,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+
+// Player detail with goal events
+app.get('/api/players/:id/detail', async (req, res) => {
+  try {
+    const player = (await pool.query('SELECT tp.*, t.name as team_name, t.flag_url as team_flag, tour.name as tournament_name FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id LEFT JOIN tournaments tour ON tp.tournament_id=tour.id WHERE tp.id=$1', [req.params.id])).rows[0];
+    if (!player) return res.status(404).json({ error: 'Joueur non trouvé' });
+    const goals = (await pool.query('SELECT ge.*, m.team1_id, m.team2_id, m.team1_score, m.team2_score, m.match_date, m.stage, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM goal_events ge JOIN matches m ON ge.match_id=m.id LEFT JOIN teams t1 ON m.team1_id=t1.id LEFT JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON ge.tournament_id=tour.id WHERE ge.player_id=$1 ORDER BY m.match_date DESC, ge.minute', [req.params.id])).rows;
+    // Also get all appearances of same player name across tournaments
+    const allVersions = (await pool.query('SELECT tp.id, tp.tournament_id, tp.goals, tour.name as tournament_name FROM tournament_players tp JOIN tournaments tour ON tp.tournament_id=tour.id WHERE tp.name=$1 AND tp.team_id=$2 ORDER BY tour.start_date DESC', [player.name, player.team_id])).rows;
+    res.json({ player, goals, tournaments: allVersions });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Add goal event
+app.post('/api/players/:id/goal-events', auth, adminAuth, async (req, res) => {
+  try {
+    const { match_id, minute } = req.body;
+    const player = (await pool.query('SELECT tournament_id FROM tournament_players WHERE id=$1', [req.params.id])).rows[0];
+    if (!player) return res.status(404).json({ error: 'Joueur non trouvé' });
+    const ge = (await pool.query('INSERT INTO goal_events(player_id, match_id, tournament_id, minute) VALUES($1,$2,$3,$4) RETURNING *', [req.params.id, match_id, player.tournament_id, minute || null])).rows[0];
+    // Update goals count
+    await pool.query('UPDATE tournament_players SET goals=(SELECT COUNT(*) FROM goal_events WHERE player_id=$1) WHERE id=$1', [req.params.id]);
+    res.json(ge);
+  } catch(e) { res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Delete goal event
+app.delete('/api/goal-events/:id', auth, adminAuth, async (req, res) => {
+  try {
+    const ge = (await pool.query('SELECT player_id FROM goal_events WHERE id=$1', [req.params.id])).rows[0];
+    if (!ge) return res.status(404).json({ error: 'But non trouvé' });
+    await pool.query('DELETE FROM goal_events WHERE id=$1', [req.params.id]);
+    await pool.query('UPDATE tournament_players SET goals=(SELECT COUNT(*) FROM goal_events WHERE player_id=$1) WHERE id=$1', [ge.player_id]);
+    res.json({ message: 'OK' });
+  } catch(e) { res.status(500).json({ error: 'Erreur' }); }
+});
 app.delete('/api/players/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM tournament_players WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Goalscorer ranking for a tournament
