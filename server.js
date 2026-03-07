@@ -99,7 +99,7 @@ const initDB = async () => {
   // Finalist predictions table
   try { await pool.query('CREATE TABLE IF NOT EXISTS finalist_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))'); } catch(e) {}
 
-  const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['tournament_runner_up',5],['tournament_finalist',3],['best_player',7],['best_goal_scorer',7]];
+  const rules = [['exact_score',5],['correct_winner',2],['correct_draw',3],['correct_goal_diff',1],['one_team_goals',1],['tournament_winner',10],['tournament_runner_up',5],['tournament_finalist',3],['best_player',7],['best_goal_scorer',7],['final_exact_score',15]];
   for (const [t,p] of rules) await pool.query('INSERT INTO scoring_rules(rule_type,points) VALUES($1,$2) ON CONFLICT DO NOTHING',[t,p]);
 
   const defaults = [
@@ -292,10 +292,20 @@ app.put('/api/matches/:id/score', auth, adminAuth, async (req, res) => { try { c
 app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
   try {
     const {team1_score,team2_score}=req.body;
-    const match=(await pool.query('SELECT tournament_id,team1_id,team2_id,next_match_id,next_match_slot,bracket_round FROM matches WHERE id=$1',[req.params.id])).rows[0];
+    const match=(await pool.query('SELECT tournament_id,team1_id,team2_id,next_match_id,next_match_slot,bracket_round,stage FROM matches WHERE id=$1',[req.params.id])).rows[0];
     await pool.query("UPDATE matches SET team1_score=$1,team2_score=$2,status='completed' WHERE id=$3",[team1_score,team2_score,req.params.id]);
     const preds=(await pool.query('SELECT * FROM predictions WHERE match_id=$1',[req.params.id])).rows;
-    for(const p of preds){const pts=await calcPoints(p,team1_score,team2_score,match?.tournament_id); await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]); if(pts>0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,p.user_id]);}
+    const isFinal = match?.bracket_round===2 || (match?.stage && match.stage.toLowerCase().includes('finale') && !match.stage.toLowerCase().includes('demi'));
+    for(const p of preds){
+      let pts=await calcPoints(p,team1_score,team2_score,match?.tournament_id);
+      // Bonus for exact final score
+      if(isFinal && p.team1_score===team1_score && p.team2_score===team2_score){
+        const rules=await getTournamentRules(match?.tournament_id);
+        pts+=(rules.final_exact_score||15);
+      }
+      await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]);
+      if(pts>0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,p.user_id]);
+    }
     if(match?.next_match_id && match.team1_id && match.team2_id && team1_score!==team2_score){const wId=team1_score>team2_score?match.team1_id:match.team2_id;const lId=team1_score>team2_score?match.team2_id:match.team1_id;const sl=match.next_match_slot===2?'team2_id':'team1_id';await pool.query(`UPDATE matches SET ${sl}=$1 WHERE id=$2`,[wId,match.next_match_id]);if(match.bracket_round===4){const third=(await pool.query('SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=3 LIMIT 1',[match.tournament_id])).rows[0];if(third){const tsl=match.bracket_position===1?'team1_id':'team2_id';await pool.query(`UPDATE matches SET ${tsl}=$1 WHERE id=$2`,[lId,third.id]);}}}
     res.json({message:'OK',predictions_processed:preds.length});
   } catch(e) { res.status(500).json({error:'Erreur'}); }
@@ -304,10 +314,19 @@ app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
 app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
   try {
     const {team1_score,team2_score}=req.body;
-    const match=(await pool.query('SELECT tournament_id,team1_id,team2_id,next_match_id,next_match_slot,bracket_round,bracket_position FROM matches WHERE id=$1',[req.params.id])).rows[0];
+    const match=(await pool.query('SELECT tournament_id,team1_id,team2_id,next_match_id,next_match_slot,bracket_round,bracket_position,stage FROM matches WHERE id=$1',[req.params.id])).rows[0];
     await pool.query("UPDATE matches SET team1_score=$1,team2_score=$2,status='completed' WHERE id=$3",[team1_score,team2_score,req.params.id]);
     const preds=(await pool.query('SELECT * FROM predictions WHERE match_id=$1',[req.params.id])).rows;
-    for(const p of preds){const pts=await calcPoints(p,team1_score,team2_score,match?.tournament_id); await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]); if(pts>0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,p.user_id]);}
+    const isFinal = match?.bracket_round===2 || (match?.stage && match.stage.toLowerCase().includes('finale') && !match.stage.toLowerCase().includes('demi'));
+    for(const p of preds){
+      let pts=await calcPoints(p,team1_score,team2_score,match?.tournament_id);
+      if(isFinal && p.team1_score===team1_score && p.team2_score===team2_score){
+        const rules=await getTournamentRules(match?.tournament_id);
+        pts+=(rules.final_exact_score||15);
+      }
+      await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]);
+      if(pts>0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,p.user_id]);
+    }
     if(match?.next_match_id && match.team1_id && match.team2_id && team1_score!==team2_score){const wId=team1_score>team2_score?match.team1_id:match.team2_id;const lId=team1_score>team2_score?match.team2_id:match.team1_id;const sl=match.next_match_slot===2?'team2_id':'team1_id';await pool.query(`UPDATE matches SET ${sl}=$1 WHERE id=$2`,[wId,match.next_match_id]);if(match.bracket_round===4){const third=(await pool.query('SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=3 LIMIT 1',[match.tournament_id])).rows[0];if(third){const tsl=match.bracket_position===1?'team1_id':'team2_id';await pool.query(`UPDATE matches SET ${tsl}=$1 WHERE id=$2`,[lId,third.id]);}}}
     res.json({message:'OK'});
   } catch(e) { res.status(500).json({error:'Erreur'}); }
