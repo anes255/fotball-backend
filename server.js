@@ -9,8 +9,27 @@ const app = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const JWT_SECRET = process.env.JWT_SECRET || 'secret123';
 
+// Simple in-memory cache to reduce DB calls
+const cache = {};
+const cacheGet = (key) => { const c = cache[key]; if (c && Date.now() - c.time < c.ttl) return c.data; delete cache[key]; return null; };
+const cacheSet = (key, data, ttl = 30000) => { cache[key] = { data, time: Date.now(), ttl }; };
+const cacheClear = (prefix) => { Object.keys(cache).forEach(k => { if (!prefix || k.startsWith(prefix)) delete cache[k]; }); };
+
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+// Auto-clear cache on write operations
+app.use((req, res, next) => {
+  if (['POST','PUT','DELETE'].includes(req.method)) {
+    const p = req.path;
+    if (p.includes('team')) cacheClear('teams');
+    if (p.includes('tournament')) cacheClear('tournaments');
+    if (p.includes('player') || p.includes('goal')) cacheClear('players');
+    if (p.includes('player') || p.includes('goal')) cacheClear('gs_');
+    if (p.includes('player') || p.includes('goal')) cacheClear('all_players');
+    if (p.includes('match')) cacheClear();
+  }
+  next();
+});
 
 const auth = async (req, res, next) => {
   try {
@@ -133,7 +152,7 @@ app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=r
 app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Teams
-app.get('/api/teams', async (req, res) => { try { res.json((await pool.query('SELECT * FROM teams ORDER BY name')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/teams', async (req, res) => { try { const c=cacheGet('teams'); if(c) return res.json(c); const d=(await pool.query('SELECT * FROM teams ORDER BY name')).rows; cacheSet('teams',d,60000); res.json(d); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.get('/api/teams/:id', async (req, res) => { try { res.json((await pool.query('SELECT * FROM teams WHERE id=$1',[req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.post('/api/teams', auth, adminAuth, async (req, res) => { try { const {name,code,flag_url}=req.body; res.json((await pool.query('INSERT INTO teams(name,code,flag_url) VALUES($1,$2,$3) RETURNING *',[name,code,flag_url])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/teams/:id', auth, adminAuth, async (req, res) => { try { const {name,code,flag_url}=req.body; res.json((await pool.query('UPDATE teams SET name=$1,code=$2,flag_url=$3 WHERE id=$4 RETURNING *',[name,code,flag_url,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -147,7 +166,7 @@ app.get('/api/teams-by-tournament', async (req, res) => {
 });
 
 // Tournaments
-app.get('/api/tournaments', async (req, res) => { try { res.json((await pool.query(`SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count, (SELECT COUNT(*) FROM tournament_teams WHERE tournament_id=t.id) as team_count FROM tournaments t ORDER BY start_date DESC`)).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/tournaments', async (req, res) => { try { const c=cacheGet('tournaments'); if(c) return res.json(c); const d=(await pool.query(`SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count, (SELECT COUNT(*) FROM tournament_teams WHERE tournament_id=t.id) as team_count FROM tournaments t ORDER BY start_date DESC`)).rows; cacheSet('tournaments',d,30000); res.json(d); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.get('/api/tournaments/active', async (req, res) => { try { res.json((await pool.query(`SELECT t.*, (SELECT COUNT(*) FROM matches WHERE tournament_id=t.id) as match_count, (SELECT COUNT(*) FROM tournament_teams WHERE tournament_id=t.id) as team_count FROM tournaments t WHERE is_active=true`)).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.get('/api/tournaments/formats', (req, res) => res.json([{value:'groups_4',label:'4 Groupes',groups:4},{value:'groups_6',label:'6 Groupes',groups:6},{value:'groups_8',label:'8 Groupes',groups:8},{value:'knockout_16',label:'Élimination (16)',groups:0},{value:'knockout_8',label:'Élimination (8)',groups:0},{value:'custom',label:'Personnalisé',groups:0}]));
 app.get('/api/tournaments/:id', async (req, res) => { try { res.json((await pool.query('SELECT * FROM tournaments WHERE id=$1',[req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -194,9 +213,9 @@ app.post('/api/admin/tournaments/:id/recalculate', auth, adminAuth, async (req, 
 });
 
 // Tournament Players
-app.get('/api/tournaments/:id/players', async (req, res) => { try { res.json((await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 ORDER BY t.name,tp.name',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/tournaments/:id/players', async (req, res) => { try { const k='players_'+req.params.id; const c=cacheGet(k); if(c) return res.json(c); const d=(await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 ORDER BY t.name,tp.name',[req.params.id])).rows; cacheSet(k,d,30000); res.json(d); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 // Get ALL players across all tournaments (for reuse)
-app.get('/api/players/all', async (req, res) => { try { res.json((await pool.query('SELECT DISTINCT ON (tp.name, tp.team_id) tp.id, tp.name, tp.team_id, tp.photo_url, tp.position, t.name as team_name, t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id ORDER BY tp.name, tp.team_id, tp.id DESC')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/players/all', async (req, res) => { try { const c=cacheGet('all_players'); if(c) return res.json(c); const d=(await pool.query('SELECT DISTINCT ON (tp.name, tp.team_id) tp.id, tp.name, tp.team_id, tp.photo_url, tp.position, t.name as team_name, t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id ORDER BY tp.name, tp.team_id, tp.id DESC')).rows; cacheSet('all_players',d,60000); res.json(d); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 // Get players for a specific team (across all tournaments)
 app.get('/api/teams/:id/players', async (req, res) => { try { res.json((await pool.query('SELECT DISTINCT ON (tp.name) tp.id, tp.name, tp.team_id, tp.photo_url, tp.position, t.name as team_name, t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.team_id=$1 ORDER BY tp.name, tp.id DESC',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.post('/api/tournaments/:id/players', auth, adminAuth, async (req, res) => { try { const {name,team_id,photo_url,position}=req.body; res.json((await pool.query('INSERT INTO tournament_players(tournament_id,team_id,name,photo_url,position) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.id,team_id||null,name,photo_url||null,position||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -244,7 +263,7 @@ app.delete('/api/goal-events/:id', auth, adminAuth, async (req, res) => {
 app.delete('/api/players/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM tournament_players WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Goalscorer ranking for a tournament
-app.get('/api/tournaments/:id/goalscorers', async (req, res) => { try { res.json((await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 AND tp.goals>0 ORDER BY tp.goals DESC,tp.name',[req.params.id])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/tournaments/:id/goalscorers', async (req, res) => { try { const k='gs_'+req.params.id; const c=cacheGet(k); if(c) return res.json(c); const d=(await pool.query('SELECT tp.*,t.name as team_name,t.flag_url as team_flag FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 AND tp.goals>0 ORDER BY tp.goals DESC,tp.name',[req.params.id])).rows; cacheSet(k,d,30000); res.json(d); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Finalist predictions (predict team that reaches the final)
 app.get('/api/finalist/:tournamentId', auth, async (req, res) => { try { res.json((await pool.query('SELECT fp.*,t.name as team_name,t.flag_url FROM finalist_predictions fp JOIN teams t ON fp.team_id=t.id WHERE fp.user_id=$1 AND fp.tournament_id=$2',[req.userId,req.params.tournamentId])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -470,7 +489,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
 });
 
 // Leaderboard - computed from predictions
-app.get('/api/leaderboard', async (req, res) => { try { res.json((await pool.query(`SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+app.get('/api/leaderboard', async (req, res) => { try { const c=cacheGet('lb'); if(c) return res.json(c); const d=(await pool.query(`SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows; cacheSet('lb',d,30000); res.json(d); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
 
 // Per-tournament leaderboard with full stats
 app.get('/api/leaderboard/tournament/:id', async (req, res) => { try { const tid=req.params.id; res.json((await pool.query(`SELECT * FROM (SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.tournament_id=$1 AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id AND twp.tournament_id=$1),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id AND pp.tournament_id=$1),0) AS total_points,(SELECT COUNT(*) FROM predictions p2 JOIN matches m2 ON p2.match_id=m2.id WHERE p2.user_id=u.id AND m2.tournament_id=$1) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.tournament_id=$1 AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.tournament_id=$1 AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.tournament_id=$1 AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u) sub WHERE sub.total_points>0 OR sub.total_predictions>0 ORDER BY sub.total_points DESC,sub.name`,[tid])).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
@@ -569,4 +588,20 @@ app.post('/api/admin/award-winner', auth, adminAuth, strictAdmin, async (req, re
 });
 
 const PORT = process.env.PORT || 3000;
-(async () => { try { await pool.query('SELECT 1'); console.log('✓ DB connected'); await initDB(); const hash=await bcrypt.hash('password',10); await pool.query('INSERT INTO users(name,phone,password,is_admin) VALUES($1,$2,$3,$4) ON CONFLICT(phone) DO UPDATE SET password=$3',['Admin','0665448641',hash,true]); app.listen(PORT,()=>console.log(`🚀 Server on port ${PORT}`)); } catch(e) { console.error('Error:',e); process.exit(1); }})();
+(async () => {
+  const startServer = () => app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
+  try {
+    await pool.query('SELECT 1');
+    console.log('✓ DB connected');
+    await initDB();
+    const hash = await bcrypt.hash('password', 10);
+    await pool.query('INSERT INTO users(name,phone,password,is_admin) VALUES($1,$2,$3,$4) ON CONFLICT(phone) DO UPDATE SET password=$3', ['Admin', '0665448641', hash, true]);
+    startServer();
+  } catch (e) {
+    console.error('DB init error:', e.message);
+    console.log('⚠️ Starting server anyway - DB may be temporarily unavailable');
+    startServer();
+    // Retry DB init after 30s
+    setTimeout(async () => { try { await initDB(); console.log('✓ DB init retry succeeded'); } catch (e2) { console.error('DB retry failed:', e2.message); } }, 30000);
+  }
+})();
