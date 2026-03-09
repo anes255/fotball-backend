@@ -71,7 +71,7 @@ const initDB = async () => {
     `CREATE TABLE IF NOT EXISTS tournament_players (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL, name VARCHAR(255) NOT NULL, photo_url TEXT, position VARCHAR(100))`,
     `CREATE TABLE IF NOT EXISTS player_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, best_player_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, best_goal_scorer_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
     `CREATE TABLE IF NOT EXISTS goal_events (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, minute INTEGER, created_at TIMESTAMP DEFAULT NOW())`,
-    `CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, type VARCHAR(50) NOT NULL, reason TEXT, points_deducted INTEGER DEFAULT 0, duration_days INTEGER, starts_at TIMESTAMP DEFAULT NOW(), ends_at TIMESTAMP, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`,
+    `CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL, type VARCHAR(50) NOT NULL, reason TEXT, match_ban_count INTEGER DEFAULT 0, minute INTEGER, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`,
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
@@ -90,8 +90,6 @@ const initDB = async () => {
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS enable_player_predictions BOOLEAN DEFAULT FALSE',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS is_employee BOOLEAN DEFAULT FALSE',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS is_sanctioned BOOLEAN DEFAULT FALSE',
-    'ALTER TABLE users ADD COLUMN IF NOT EXISTS sanction_ends_at TIMESTAMP',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS correct_predictions INTEGER DEFAULT 0',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_predictions INTEGER DEFAULT 0',
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS lock_match_predictions BOOLEAN DEFAULT FALSE',
@@ -172,8 +170,8 @@ app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '4.
 
 // Auth
 app.post('/api/auth/register', async (req, res) => { try { const {name,phone,password,avatar_url}=req.body||{}; if(!name||!phone||!password) return res.status(400).json({error:'Champs requis'}); const clean=phone.replace(/[\s-]/g,''); if(!/^(05|06|07)\d{8}$/.test(clean)) return res.status(400).json({error:'Numéro invalide'}); if((await pool.query('SELECT id FROM users WHERE phone=$1',[clean])).rows.length) return res.status(400).json({error:'Numéro déjà utilisé'}); const r=await pool.query('INSERT INTO users(name,phone,password,avatar_url) VALUES($1,$2,$3,$4) RETURNING *',[name,clean,await bcrypt.hash(password,10),avatar_url||null]); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{...r.rows[0],password:undefined}}); } catch(e) { console.error(e); res.status(500).json({error:'Erreur serveur'}); }});
-app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=req.body||{}; const clean=phone?.replace(/[\s-]/g,''); const r=await pool.query('SELECT * FROM users WHERE phone=$1',[clean]); if(!r.rows[0]||!(await bcrypt.compare(password,r.rows[0].password))) return res.status(401).json({error:'Identifiants incorrects'}); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{id:r.rows[0].id,name:r.rows[0].name,phone:r.rows[0].phone,is_admin:r.rows[0].is_admin,is_employee:r.rows[0].is_employee||false,total_points:r.rows[0].total_points||0,avatar_url:r.rows[0].avatar_url||null,is_sanctioned:r.rows[0].is_sanctioned||false,sanction_ends_at:r.rows[0].sanction_ends_at||null}}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
-app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,avatar_url,is_sanctioned,sanction_ends_at FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=req.body||{}; const clean=phone?.replace(/[\s-]/g,''); const r=await pool.query('SELECT * FROM users WHERE phone=$1',[clean]); if(!r.rows[0]||!(await bcrypt.compare(password,r.rows[0].password))) return res.status(401).json({error:'Identifiants incorrects'}); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{id:r.rows[0].id,name:r.rows[0].name,phone:r.rows[0].phone,is_admin:r.rows[0].is_admin,is_employee:r.rows[0].is_employee||false,total_points:r.rows[0].total_points||0,avatar_url:r.rows[0].avatar_url||null}}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
+app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,avatar_url FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/auth/avatar', auth, async (req, res) => { try { const {avatar_url}=req.body; res.json((await pool.query('UPDATE users SET avatar_url=$1 WHERE id=$2 RETURNING id,name,phone,is_admin,is_employee,total_points,avatar_url',[avatar_url||null,req.userId])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Teams
@@ -258,7 +256,18 @@ app.get('/api/players/:id/detail', async (req, res) => {
     const goals = (await pool.query('SELECT ge.*, m.team1_id, m.team2_id, m.team1_score, m.team2_score, m.match_date, m.stage, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM goal_events ge JOIN matches m ON ge.match_id=m.id LEFT JOIN teams t1 ON m.team1_id=t1.id LEFT JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON ge.tournament_id=tour.id WHERE ge.player_id=$1 ORDER BY m.match_date DESC, ge.minute', [req.params.id])).rows;
     // Also get all appearances of same player name across tournaments
     const allVersions = (await pool.query('SELECT tp.id, tp.tournament_id, tp.goals, tour.name as tournament_name FROM tournament_players tp JOIN tournaments tour ON tp.tournament_id=tour.id WHERE tp.name=$1 AND tp.team_id=$2 ORDER BY tour.start_date DESC', [player.name, player.team_id])).rows;
-    res.json({ player, goals, tournaments: allVersions });
+    // Get sanctions for this player
+    const sanctions = (await pool.query(`
+      SELECT s.*, m.match_date, m.stage as match_stage,
+        mt1.name as match_team1_name, mt2.name as match_team2_name
+      FROM sanctions s
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
+      WHERE s.player_id = $1
+      ORDER BY s.created_at DESC
+    `, [req.params.id])).rows;
+    res.json({ player, goals, tournaments: allVersions, sanctions });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
 });
 
@@ -456,17 +465,7 @@ app.delete('/api/admin/tournaments/:id/bracket', auth, adminAuth, async (req, re
 
 // Predictions
 app.get('/api/predictions', auth, async (req, res) => { try { res.json((await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY m.match_date DESC`,[req.userId])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; 
-    // Check if user is sanctioned
-    const sanctionCheck = (await pool.query("SELECT is_sanctioned, sanction_ends_at FROM users WHERE id=$1",[req.userId])).rows[0];
-    if(sanctionCheck?.is_sanctioned) {
-      if(sanctionCheck.sanction_ends_at && new Date(sanctionCheck.sanction_ends_at) <= new Date()) {
-        await pool.query("UPDATE users SET is_sanctioned=false, sanction_ends_at=null WHERE id=$1",[req.userId]);
-      } else {
-        return res.status(403).json({error:'Votre compte est sanctionné. Vous ne pouvez pas faire de pronostics.'});
-      }
-    }
-    const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming'||new Date(m.match_date)<=new Date()) return res.status(400).json({error:'Pronostics fermés'}); const t=(await pool.query('SELECT lock_match_predictions FROM tournaments WHERE id=$1',[m.tournament_id])).rows[0]; if(t?.lock_match_predictions) return res.status(400).json({error:'Pronostics verrouillés par l\'admin'}); res.json((await pool.query('INSERT INTO predictions(user_id,match_id,team1_score,team2_score) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,match_id) DO UPDATE SET team1_score=$3,team2_score=$4 RETURNING *',[req.userId,match_id,team1_score,team2_score])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming'||new Date(m.match_date)<=new Date()) return res.status(400).json({error:'Pronostics fermés'}); const t=(await pool.query('SELECT lock_match_predictions FROM tournaments WHERE id=$1',[m.tournament_id])).rows[0]; if(t?.lock_match_predictions) return res.status(400).json({error:'Pronostics verrouillés par l\'admin'}); res.json((await pool.query('INSERT INTO predictions(user_id,match_id,team1_score,team2_score) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,match_id) DO UPDATE SET team1_score=$3,team2_score=$4 RETURNING *',[req.userId,match_id,team1_score,team2_score])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.get('/api/users/:id/predictions', async (req, res) => {
   try {
@@ -590,18 +589,28 @@ app.get('/api/daily-winners', async (req, res) => {
 });
 
 // Admin
-app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,created_at,is_sanctioned,sanction_ends_at,avatar_url FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,created_at,avatar_url FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { const {is_admin,is_employee,total_points}=req.body; res.json((await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),is_employee=COALESCE($2,is_employee),total_points=COALESCE($3,total_points) WHERE id=$4 RETURNING *',[is_admin,is_employee,total_points,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM users WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
-// === SANCTIONS MANAGEMENT ===
-// Get all sanctions
+// === PLAYER SANCTIONS MANAGEMENT ===
+// Get all sanctions (with player, team, tournament info)
 app.get('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT s.*, u.name as user_name, u.phone as user_phone, c.name as created_by_name
+      SELECT s.*, tp.name as player_name, tp.photo_url as player_photo,
+        t.name as team_name, t.flag_url as team_flag,
+        tour.name as tournament_name, tour.id as tournament_id,
+        m.match_date, m.stage as match_stage,
+        mt1.name as match_team1_name, mt2.name as match_team2_name,
+        c.name as created_by_name
       FROM sanctions s
-      JOIN users u ON s.user_id = u.id
+      JOIN tournament_players tp ON s.player_id = tp.id
+      LEFT JOIN teams t ON tp.team_id = t.id
+      LEFT JOIN tournaments tour ON s.tournament_id = tour.id
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
       LEFT JOIN users c ON s.created_by = c.id
       ORDER BY s.created_at DESC
     `);
@@ -609,82 +618,88 @@ app.get('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
-// Get sanctions for a specific user
-app.get('/api/admin/sanctions/user/:userId', auth, adminAuth, async (req, res) => {
+// Get sanctions for a specific player
+app.get('/api/players/:id/sanctions', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT s.*, c.name as created_by_name
-      FROM sanctions s LEFT JOIN users c ON s.created_by = c.id
-      WHERE s.user_id = $1 ORDER BY s.created_at DESC
-    `, [req.params.userId]);
+      SELECT s.*, m.match_date, m.stage as match_stage,
+        mt1.name as match_team1_name, mt2.name as match_team2_name,
+        c.name as created_by_name
+      FROM sanctions s
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
+      LEFT JOIN users c ON s.created_by = c.id
+      WHERE s.player_id = $1
+      ORDER BY s.created_at DESC
+    `, [req.params.id]);
     res.json(result.rows);
   } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
 
-// Create a sanction
-app.post('/api/admin/sanctions', auth, adminAuth, strictAdmin, async (req, res) => {
+// Get sanctions for a tournament
+app.get('/api/admin/sanctions/tournament/:tournamentId', auth, adminAuth, async (req, res) => {
   try {
-    const { user_id, type, reason, points_deducted, duration_days } = req.body;
-    if (!user_id || !type) return res.status(400).json({error:'Utilisateur et type requis'});
+    const result = await pool.query(`
+      SELECT s.*, tp.name as player_name, tp.photo_url as player_photo,
+        t.name as team_name, t.flag_url as team_flag,
+        m.match_date, m.stage as match_stage,
+        mt1.name as match_team1_name, mt2.name as match_team2_name,
+        c.name as created_by_name
+      FROM sanctions s
+      JOIN tournament_players tp ON s.player_id = tp.id
+      LEFT JOIN teams t ON tp.team_id = t.id
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
+      LEFT JOIN users c ON s.created_by = c.id
+      WHERE s.tournament_id = $1
+      ORDER BY s.created_at DESC
+    `, [req.params.tournamentId]);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Create a player sanction
+app.post('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
+  try {
+    const { player_id, tournament_id, match_id, type, reason, match_ban_count, minute } = req.body;
+    if (!player_id || !type) return res.status(400).json({error:'Joueur et type requis'});
     
-    const endsAt = duration_days ? new Date(Date.now() + duration_days * 86400000).toISOString() : null;
-    
-    // Create sanction record
     const sanction = (await pool.query(
-      'INSERT INTO sanctions(user_id, type, reason, points_deducted, duration_days, ends_at, created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',
-      [user_id, type, reason || null, points_deducted || 0, duration_days || null, endsAt, req.userId]
+      'INSERT INTO sanctions(player_id, tournament_id, match_id, type, reason, match_ban_count, minute, created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [player_id, tournament_id || null, match_id || null, type, reason || null, match_ban_count || 0, minute || null, req.userId]
     )).rows[0];
     
-    // Apply sanction effects
-    if (type === 'points_deduction' && points_deducted > 0) {
-      await pool.query('UPDATE users SET total_points = GREATEST(0, COALESCE(total_points,0) - $1) WHERE id = $2', [points_deducted, user_id]);
-    }
-    if (type === 'prediction_ban' || type === 'full_ban') {
-      await pool.query('UPDATE users SET is_sanctioned = true, sanction_ends_at = $1 WHERE id = $2', [endsAt, user_id]);
-    }
-    if (type === 'warning') {
-      // Warning only - no action beyond recording
-    }
+    // Get player info for response
+    const player = (await pool.query(`
+      SELECT tp.name as player_name, t.name as team_name, t.flag_url as team_flag, tour.name as tournament_name
+      FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id LEFT JOIN tournaments tour ON tp.tournament_id=tour.id
+      WHERE tp.id=$1
+    `, [player_id])).rows[0];
     
-    const user = (await pool.query('SELECT name FROM users WHERE id=$1', [user_id])).rows[0];
-    res.json({ ...sanction, user_name: user?.name });
+    res.json({ ...sanction, ...player });
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur: ' + e.message}); }
 });
 
-// Revoke/deactivate a sanction
-app.put('/api/admin/sanctions/:id/revoke', auth, adminAuth, strictAdmin, async (req, res) => {
+// Revoke a sanction
+app.put('/api/admin/sanctions/:id/revoke', auth, adminAuth, async (req, res) => {
   try {
     const sanction = (await pool.query('SELECT * FROM sanctions WHERE id=$1', [req.params.id])).rows[0];
     if (!sanction) return res.status(404).json({error:'Sanction non trouvée'});
-    
     await pool.query('UPDATE sanctions SET is_active = false WHERE id = $1', [req.params.id]);
-    
-    // Restore points if it was a deduction
-    if (sanction.type === 'points_deduction' && sanction.points_deducted > 0) {
-      await pool.query('UPDATE users SET total_points = COALESCE(total_points,0) + $1 WHERE id = $2', [sanction.points_deducted, sanction.user_id]);
-    }
-    // Lift ban if no other active bans remain
-    if (sanction.type === 'prediction_ban' || sanction.type === 'full_ban') {
-      const otherActiveBans = (await pool.query(
-        "SELECT id FROM sanctions WHERE user_id=$1 AND id!=$2 AND is_active=true AND type IN ('prediction_ban','full_ban') AND (ends_at IS NULL OR ends_at > NOW())",
-        [sanction.user_id, req.params.id]
-      )).rows;
-      if (otherActiveBans.length === 0) {
-        await pool.query('UPDATE users SET is_sanctioned = false, sanction_ends_at = null WHERE id = $1', [sanction.user_id]);
-      }
-    }
-    
     res.json({message:'Sanction révoquée'});
-  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
 
 // Delete a sanction record
-app.delete('/api/admin/sanctions/:id', auth, adminAuth, strictAdmin, async (req, res) => {
+app.delete('/api/admin/sanctions/:id', auth, adminAuth, async (req, res) => {
   try {
     await pool.query('DELETE FROM sanctions WHERE id=$1', [req.params.id]);
     res.json({message:'OK'});
   } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
+
 
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2',[v,k]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
