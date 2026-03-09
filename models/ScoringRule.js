@@ -43,7 +43,7 @@ const ScoringRule = {
     const predWinner = pred.team1 > pred.team2 ? 'team1' : pred.team1 < pred.team2 ? 'team2' : 'draw';
     const actualWinner = actual.team1 > actual.team2 ? 'team1' : actual.team1 < actual.team2 ? 'team2' : 'draw';
 
-    // Correct winner/draw
+    // Correct winner/draw - all bonuses only apply when winner is correct
     if (predWinner === actualWinner) {
       if (predWinner === 'draw') {
         const pts = rules.correct_draw || 3;
@@ -53,29 +53,30 @@ const ScoringRule = {
         const pts = rules.correct_winner || 2;
         points += pts;
         breakdown.push({ type: 'correct_winner', points: pts, label: 'Bon vainqueur' });
+      }
 
-        // Correct goal difference (bonus when winner is correct)
-        const predDiff = Math.abs(pred.team1 - pred.team2);
-        const actualDiff = Math.abs(actual.team1 - actual.team2);
-        if (predDiff === actualDiff) {
-          const diffPts = rules.correct_goal_difference || 1;
-          points += diffPts;
-          breakdown.push({ type: 'correct_goal_difference', points: diffPts, label: 'Bonne différence' });
-        }
+      // Correct goal difference (bonus when winner is correct)
+      const predDiff = pred.team1 - pred.team2;
+      const actualDiff = actual.team1 - actual.team2;
+      if (predDiff === actualDiff) {
+        const diffPts = rules.correct_goal_difference || 1;
+        points += diffPts;
+        breakdown.push({ type: 'correct_goal_difference', points: diffPts, label: 'Bonne différence' });
+      }
+
+      // Correct goals for individual teams (only when winner is correct)
+      if (pred.team1 === actual.team1) {
+        const pts = rules.correct_goals_one_team || 1;
+        points += pts;
+        breakdown.push({ type: 'correct_team1_goals', points: pts, label: 'Buts équipe 1' });
+      }
+      if (pred.team2 === actual.team2) {
+        const pts = rules.correct_goals_one_team || 1;
+        points += pts;
+        breakdown.push({ type: 'correct_team2_goals', points: pts, label: 'Buts équipe 2' });
       }
     }
-
-    // Correct goals for individual teams (can stack)
-    if (pred.team1 === actual.team1) {
-      const pts = rules.correct_goals_one_team || 1;
-      points += pts;
-      breakdown.push({ type: 'correct_team1_goals', points: pts, label: 'Buts équipe 1' });
-    }
-    if (pred.team2 === actual.team2) {
-      const pts = rules.correct_goals_one_team || 1;
-      points += pts;
-      breakdown.push({ type: 'correct_team2_goals', points: pts, label: 'Buts équipe 2' });
-    }
+    // No points if winner prediction is wrong
 
     return { points, breakdown };
   }
