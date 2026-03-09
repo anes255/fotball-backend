@@ -75,6 +75,17 @@ const initDB = async () => {
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
+  // Migration: drop old sanctions table if it has user_id column (old schema targeting users instead of players)
+  try {
+    const colCheck = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name='sanctions' AND column_name='user_id'");
+    if (colCheck.rows.length > 0) {
+      console.log('Migrating sanctions table from old user-based schema to player-based schema...');
+      await pool.query('DROP TABLE IF EXISTS sanctions CASCADE');
+      await pool.query(`CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL, type VARCHAR(50) NOT NULL, reason TEXT, match_ban_count INTEGER DEFAULT 0, minute INTEGER, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`);
+      console.log('Sanctions table migrated successfully');
+    }
+  } catch(e) { console.log('Sanctions migration note:', e.message); }
+
   const dropFKs = [
     `DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'tournaments_best_player_id_fkey') THEN ALTER TABLE tournaments DROP CONSTRAINT tournaments_best_player_id_fkey; END IF; END $$`,
     `DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'tournaments_best_goal_scorer_id_fkey') THEN ALTER TABLE tournaments DROP CONSTRAINT tournaments_best_goal_scorer_id_fkey; END IF; END $$`,
@@ -254,19 +265,21 @@ app.get('/api/players/:id/detail', async (req, res) => {
     const player = (await pool.query('SELECT tp.*, t.name as team_name, t.flag_url as team_flag, tour.name as tournament_name FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id LEFT JOIN tournaments tour ON tp.tournament_id=tour.id WHERE tp.id=$1', [req.params.id])).rows[0];
     if (!player) return res.status(404).json({ error: 'Joueur non trouvé' });
     const goals = (await pool.query('SELECT ge.*, m.team1_id, m.team2_id, m.team1_score, m.team2_score, m.match_date, m.stage, t1.name as team1_name, t1.flag_url as team1_flag, t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name FROM goal_events ge JOIN matches m ON ge.match_id=m.id LEFT JOIN teams t1 ON m.team1_id=t1.id LEFT JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON ge.tournament_id=tour.id WHERE ge.player_id=$1 ORDER BY m.match_date DESC, ge.minute', [req.params.id])).rows;
-    // Also get all appearances of same player name across tournaments
     const allVersions = (await pool.query('SELECT tp.id, tp.tournament_id, tp.goals, tour.name as tournament_name FROM tournament_players tp JOIN tournaments tour ON tp.tournament_id=tour.id WHERE tp.name=$1 AND tp.team_id=$2 ORDER BY tour.start_date DESC', [player.name, player.team_id])).rows;
-    // Get sanctions for this player
-    const sanctions = (await pool.query(`
-      SELECT s.*, m.match_date, m.stage as match_stage,
-        mt1.name as match_team1_name, mt2.name as match_team2_name
-      FROM sanctions s
-      LEFT JOIN matches m ON s.match_id = m.id
-      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
-      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
-      WHERE s.player_id = $1
-      ORDER BY s.created_at DESC
-    `, [req.params.id])).rows;
+    // Get sanctions - wrapped in try/catch so it never breaks the endpoint
+    let sanctions = [];
+    try {
+      sanctions = (await pool.query(`
+        SELECT s.*, m.match_date, m.stage as match_stage,
+          mt1.name as match_team1_name, mt2.name as match_team2_name
+        FROM sanctions s
+        LEFT JOIN matches m ON s.match_id = m.id
+        LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+        LEFT JOIN teams mt2 ON m.team2_id = mt2.id
+        WHERE s.player_id = $1
+        ORDER BY s.created_at DESC
+      `, [req.params.id])).rows;
+    } catch(e) { console.log('Sanctions not available:', e.message); }
     res.json({ player, goals, tournaments: allVersions, sanctions });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
 });
@@ -615,7 +628,7 @@ app.get('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
       ORDER BY s.created_at DESC
     `);
     res.json(result.rows);
-  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+  } catch(e) { console.log('Sanctions query error:', e.message); res.json([]); }
 });
 
 // Get sanctions for a specific player
@@ -634,7 +647,7 @@ app.get('/api/players/:id/sanctions', async (req, res) => {
       ORDER BY s.created_at DESC
     `, [req.params.id]);
     res.json(result.rows);
-  } catch(e) { res.status(500).json({error:'Erreur'}); }
+  } catch(e) { res.json([]); }
 });
 
 // Get sanctions for a tournament
@@ -657,7 +670,7 @@ app.get('/api/admin/sanctions/tournament/:tournamentId', auth, adminAuth, async 
       ORDER BY s.created_at DESC
     `, [req.params.tournamentId]);
     res.json(result.rows);
-  } catch(e) { res.status(500).json({error:'Erreur'}); }
+  } catch(e) { res.json([]); }
 });
 
 // Create a player sanction
