@@ -71,6 +71,7 @@ const initDB = async () => {
     `CREATE TABLE IF NOT EXISTS tournament_players (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL, name VARCHAR(255) NOT NULL, photo_url TEXT, position VARCHAR(100))`,
     `CREATE TABLE IF NOT EXISTS player_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, best_player_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, best_goal_scorer_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
     `CREATE TABLE IF NOT EXISTS goal_events (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, minute INTEGER, created_at TIMESTAMP DEFAULT NOW())`,
+    `CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, type VARCHAR(50) NOT NULL, reason TEXT, points_deducted INTEGER DEFAULT 0, duration_days INTEGER, starts_at TIMESTAMP DEFAULT NOW(), ends_at TIMESTAMP, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`,
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
@@ -89,6 +90,10 @@ const initDB = async () => {
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS enable_player_predictions BOOLEAN DEFAULT FALSE',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS is_employee BOOLEAN DEFAULT FALSE',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS is_sanctioned BOOLEAN DEFAULT FALSE',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS sanction_ends_at TIMESTAMP',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS correct_predictions INTEGER DEFAULT 0',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS total_predictions INTEGER DEFAULT 0',
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS lock_match_predictions BOOLEAN DEFAULT FALSE',
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS lock_winner_prediction BOOLEAN DEFAULT FALSE',
     'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS lock_player_predictions BOOLEAN DEFAULT FALSE',
@@ -140,28 +145,35 @@ const getTournamentRules = async (tournamentId) => {
 
 const calcPoints = async (pred, t1, t2, tournamentId) => {
   const rules = await getTournamentRules(tournamentId);
-  let pts = 0;
   const isExact = pred.team1_score===t1 && pred.team2_score===t2;
+  
+  // Exact score = exclusive reward, no stacking
+  if (isExact) {
+    return rules.exact_score || 5;
+  }
+  
+  let pts = 0;
   const aW = t1>t2?1:t1<t2?2:0, pW = pred.team1_score>pred.team2_score?1:pred.team1_score<pred.team2_score?2:0;
+  
   // Correct winner or draw
   if (aW===pW) {
     pts += aW===0?(rules.correct_draw||3):(rules.correct_winner||2);
+    // Goal difference bonus only when winner is correct
     if ((t1-t2)===(pred.team1_score-pred.team2_score)) pts+=rules.correct_goal_diff||1;
+    // Individual team goals bonus only when winner/draw is correct
+    if (pred.team1_score===t1) pts+=rules.one_team_goals||1;
+    if (pred.team2_score===t2) pts+=rules.one_team_goals||1;
   }
-  // Individual team goals correct
-  if (pred.team1_score===t1) pts+=rules.one_team_goals||1;
-  if (pred.team2_score===t2) pts+=rules.one_team_goals||1;
-  // Exact score bonus on TOP of everything
-  if (isExact) pts+=rules.exact_score||5;
+  // No points if winner prediction is wrong
   return pts;
 };
 
 app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '4.0' }));
 
 // Auth
-app.post('/api/auth/register', async (req, res) => { try { const {name,phone,password}=req.body||{}; if(!name||!phone||!password) return res.status(400).json({error:'Champs requis'}); const clean=phone.replace(/[\s-]/g,''); if(!/^(05|06|07)\d{8}$/.test(clean)) return res.status(400).json({error:'Numéro invalide'}); if((await pool.query('SELECT id FROM users WHERE phone=$1',[clean])).rows.length) return res.status(400).json({error:'Numéro déjà utilisé'}); const r=await pool.query('INSERT INTO users(name,phone,password) VALUES($1,$2,$3) RETURNING *',[name,clean,await bcrypt.hash(password,10)]); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:r.rows[0]}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
-app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=req.body||{}; const clean=phone?.replace(/[\s-]/g,''); const r=await pool.query('SELECT * FROM users WHERE phone=$1',[clean]); if(!r.rows[0]||!(await bcrypt.compare(password,r.rows[0].password))) return res.status(401).json({error:'Identifiants incorrects'}); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{id:r.rows[0].id,name:r.rows[0].name,phone:r.rows[0].phone,is_admin:r.rows[0].is_admin,is_employee:r.rows[0].is_employee||false,total_points:r.rows[0].total_points||0,avatar_url:r.rows[0].avatar_url||null}}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
-app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,avatar_url FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/auth/register', async (req, res) => { try { const {name,phone,password,avatar_url}=req.body||{}; if(!name||!phone||!password) return res.status(400).json({error:'Champs requis'}); const clean=phone.replace(/[\s-]/g,''); if(!/^(05|06|07)\d{8}$/.test(clean)) return res.status(400).json({error:'Numéro invalide'}); if((await pool.query('SELECT id FROM users WHERE phone=$1',[clean])).rows.length) return res.status(400).json({error:'Numéro déjà utilisé'}); const r=await pool.query('INSERT INTO users(name,phone,password,avatar_url) VALUES($1,$2,$3,$4) RETURNING *',[name,clean,await bcrypt.hash(password,10),avatar_url||null]); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{...r.rows[0],password:undefined}}); } catch(e) { console.error(e); res.status(500).json({error:'Erreur serveur'}); }});
+app.post('/api/auth/login', async (req, res) => { try { const {phone,password}=req.body||{}; const clean=phone?.replace(/[\s-]/g,''); const r=await pool.query('SELECT * FROM users WHERE phone=$1',[clean]); if(!r.rows[0]||!(await bcrypt.compare(password,r.rows[0].password))) return res.status(401).json({error:'Identifiants incorrects'}); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{id:r.rows[0].id,name:r.rows[0].name,phone:r.rows[0].phone,is_admin:r.rows[0].is_admin,is_employee:r.rows[0].is_employee||false,total_points:r.rows[0].total_points||0,avatar_url:r.rows[0].avatar_url||null,is_sanctioned:r.rows[0].is_sanctioned||false,sanction_ends_at:r.rows[0].sanction_ends_at||null}}); } catch(e) { res.status(500).json({error:'Erreur serveur'}); }});
+app.get('/api/auth/verify', auth, async (req, res) => { try { res.json({valid:true,user:(await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,avatar_url,is_sanctioned,sanction_ends_at FROM users WHERE id=$1',[req.userId])).rows[0]}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/auth/avatar', auth, async (req, res) => { try { const {avatar_url}=req.body; res.json((await pool.query('UPDATE users SET avatar_url=$1 WHERE id=$2 RETURNING id,name,phone,is_admin,is_employee,total_points,avatar_url',[avatar_url||null,req.userId])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Teams
@@ -316,12 +328,15 @@ app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
         const rules=await getTournamentRules(match?.tournament_id);
         pts+=(rules.final_exact_score||15);
       }
+      const oldPts = p.points_earned || 0;
       await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]);
-      if(pts>0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,p.user_id]);
+      // Subtract old points and add new (safe for re-completion)
+      const diff = pts - oldPts;
+      if(diff !== 0) await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2',[diff,p.user_id]);
     }
     if(match?.next_match_id && match.team1_id && match.team2_id && team1_score!==team2_score){const wId=team1_score>team2_score?match.team1_id:match.team2_id;const lId=team1_score>team2_score?match.team2_id:match.team1_id;const sl=match.next_match_slot===2?'team2_id':'team1_id';await pool.query(`UPDATE matches SET ${sl}=$1 WHERE id=$2`,[wId,match.next_match_id]);if(match.bracket_round===4){const third=(await pool.query('SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=3 LIMIT 1',[match.tournament_id])).rows[0];if(third){const tsl=match.bracket_position===1?'team1_id':'team2_id';await pool.query(`UPDATE matches SET ${tsl}=$1 WHERE id=$2`,[lId,third.id]);}}}
     res.json({message:'OK',predictions_processed:preds.length});
-  } catch(e) { res.status(500).json({error:'Erreur'}); }
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
 app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
@@ -337,12 +352,14 @@ app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
         const rules=await getTournamentRules(match?.tournament_id);
         pts+=(rules.final_exact_score||15);
       }
+      const oldPts = p.points_earned || 0;
       await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]);
-      if(pts>0) await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[pts,p.user_id]);
+      const diff = pts - oldPts;
+      if(diff !== 0) await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2',[diff,p.user_id]);
     }
     if(match?.next_match_id && match.team1_id && match.team2_id && team1_score!==team2_score){const wId=team1_score>team2_score?match.team1_id:match.team2_id;const lId=team1_score>team2_score?match.team2_id:match.team1_id;const sl=match.next_match_slot===2?'team2_id':'team1_id';await pool.query(`UPDATE matches SET ${sl}=$1 WHERE id=$2`,[wId,match.next_match_id]);if(match.bracket_round===4){const third=(await pool.query('SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=3 LIMIT 1',[match.tournament_id])).rows[0];if(third){const tsl=match.bracket_position===1?'team1_id':'team2_id';await pool.query(`UPDATE matches SET ${tsl}=$1 WHERE id=$2`,[lId,third.id]);}}}
     res.json({message:'OK'});
-  } catch(e) { res.status(500).json({error:'Erreur'}); }
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
 // Bracket generation - supports any number of teams (3-32) with byes
@@ -439,7 +456,17 @@ app.delete('/api/admin/tournaments/:id/bracket', auth, adminAuth, async (req, re
 
 // Predictions
 app.get('/api/predictions', auth, async (req, res) => { try { res.json((await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY m.match_date DESC`,[req.userId])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming'||new Date(m.match_date)<=new Date()) return res.status(400).json({error:'Pronostics fermés'}); const t=(await pool.query('SELECT lock_match_predictions FROM tournaments WHERE id=$1',[m.tournament_id])).rows[0]; if(t?.lock_match_predictions) return res.status(400).json({error:'Pronostics verrouillés par l\'admin'}); res.json((await pool.query('INSERT INTO predictions(user_id,match_id,team1_score,team2_score) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,match_id) DO UPDATE SET team1_score=$3,team2_score=$4 RETURNING *',[req.userId,match_id,team1_score,team2_score])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; 
+    // Check if user is sanctioned
+    const sanctionCheck = (await pool.query("SELECT is_sanctioned, sanction_ends_at FROM users WHERE id=$1",[req.userId])).rows[0];
+    if(sanctionCheck?.is_sanctioned) {
+      if(sanctionCheck.sanction_ends_at && new Date(sanctionCheck.sanction_ends_at) <= new Date()) {
+        await pool.query("UPDATE users SET is_sanctioned=false, sanction_ends_at=null WHERE id=$1",[req.userId]);
+      } else {
+        return res.status(403).json({error:'Votre compte est sanctionné. Vous ne pouvez pas faire de pronostics.'});
+      }
+    }
+    const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming'||new Date(m.match_date)<=new Date()) return res.status(400).json({error:'Pronostics fermés'}); const t=(await pool.query('SELECT lock_match_predictions FROM tournaments WHERE id=$1',[m.tournament_id])).rows[0]; if(t?.lock_match_predictions) return res.status(400).json({error:'Pronostics verrouillés par l\'admin'}); res.json((await pool.query('INSERT INTO predictions(user_id,match_id,team1_score,team2_score) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,match_id) DO UPDATE SET team1_score=$3,team2_score=$4 RETURNING *',[req.userId,match_id,team1_score,team2_score])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.get('/api/users/:id/predictions', async (req, res) => {
   try {
@@ -524,7 +551,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
 });
 
 // Leaderboard - computed from predictions
-app.get('/api/leaderboard', async (req, res) => { try { const c=cacheGet('lb'); if(c) return res.json(c); const d=(await pool.query(`SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows; cacheSet('lb',d,30000); res.json(d); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+app.get('/api/leaderboard', async (req, res) => { try { const c=cacheGet('lb'); if(c) return res.json(c); const d=(await pool.query(`SELECT u.id,u.name,u.avatar_url,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows; cacheSet('lb',d,30000); res.json(d); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
 
 // Per-tournament leaderboard with full stats
 app.get('/api/leaderboard/tournament/:id', async (req, res) => { try { const tid=req.params.id; res.json((await pool.query(`SELECT * FROM (SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.tournament_id=$1 AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id AND twp.tournament_id=$1),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id AND pp.tournament_id=$1),0) AS total_points,(SELECT COUNT(*) FROM predictions p2 JOIN matches m2 ON p2.match_id=m2.id WHERE p2.user_id=u.id AND m2.tournament_id=$1) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.tournament_id=$1 AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.tournament_id=$1 AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.tournament_id=$1 AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u) sub WHERE sub.total_points>0 OR sub.total_predictions>0 ORDER BY sub.total_points DESC,sub.name`,[tid])).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
@@ -563,9 +590,102 @@ app.get('/api/daily-winners', async (req, res) => {
 });
 
 // Admin
-app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,created_at FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,created_at,is_sanctioned,sanction_ends_at,avatar_url FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { const {is_admin,is_employee,total_points}=req.body; res.json((await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),is_employee=COALESCE($2,is_employee),total_points=COALESCE($3,total_points) WHERE id=$4 RETURNING *',[is_admin,is_employee,total_points,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM users WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+
+// === SANCTIONS MANAGEMENT ===
+// Get all sanctions
+app.get('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT s.*, u.name as user_name, u.phone as user_phone, c.name as created_by_name
+      FROM sanctions s
+      JOIN users u ON s.user_id = u.id
+      LEFT JOIN users c ON s.created_by = c.id
+      ORDER BY s.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Get sanctions for a specific user
+app.get('/api/admin/sanctions/user/:userId', auth, adminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT s.*, c.name as created_by_name
+      FROM sanctions s LEFT JOIN users c ON s.created_by = c.id
+      WHERE s.user_id = $1 ORDER BY s.created_at DESC
+    `, [req.params.userId]);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Create a sanction
+app.post('/api/admin/sanctions', auth, adminAuth, strictAdmin, async (req, res) => {
+  try {
+    const { user_id, type, reason, points_deducted, duration_days } = req.body;
+    if (!user_id || !type) return res.status(400).json({error:'Utilisateur et type requis'});
+    
+    const endsAt = duration_days ? new Date(Date.now() + duration_days * 86400000).toISOString() : null;
+    
+    // Create sanction record
+    const sanction = (await pool.query(
+      'INSERT INTO sanctions(user_id, type, reason, points_deducted, duration_days, ends_at, created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',
+      [user_id, type, reason || null, points_deducted || 0, duration_days || null, endsAt, req.userId]
+    )).rows[0];
+    
+    // Apply sanction effects
+    if (type === 'points_deduction' && points_deducted > 0) {
+      await pool.query('UPDATE users SET total_points = GREATEST(0, COALESCE(total_points,0) - $1) WHERE id = $2', [points_deducted, user_id]);
+    }
+    if (type === 'prediction_ban' || type === 'full_ban') {
+      await pool.query('UPDATE users SET is_sanctioned = true, sanction_ends_at = $1 WHERE id = $2', [endsAt, user_id]);
+    }
+    if (type === 'warning') {
+      // Warning only - no action beyond recording
+    }
+    
+    const user = (await pool.query('SELECT name FROM users WHERE id=$1', [user_id])).rows[0];
+    res.json({ ...sanction, user_name: user?.name });
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur: ' + e.message}); }
+});
+
+// Revoke/deactivate a sanction
+app.put('/api/admin/sanctions/:id/revoke', auth, adminAuth, strictAdmin, async (req, res) => {
+  try {
+    const sanction = (await pool.query('SELECT * FROM sanctions WHERE id=$1', [req.params.id])).rows[0];
+    if (!sanction) return res.status(404).json({error:'Sanction non trouvée'});
+    
+    await pool.query('UPDATE sanctions SET is_active = false WHERE id = $1', [req.params.id]);
+    
+    // Restore points if it was a deduction
+    if (sanction.type === 'points_deduction' && sanction.points_deducted > 0) {
+      await pool.query('UPDATE users SET total_points = COALESCE(total_points,0) + $1 WHERE id = $2', [sanction.points_deducted, sanction.user_id]);
+    }
+    // Lift ban if no other active bans remain
+    if (sanction.type === 'prediction_ban' || sanction.type === 'full_ban') {
+      const otherActiveBans = (await pool.query(
+        "SELECT id FROM sanctions WHERE user_id=$1 AND id!=$2 AND is_active=true AND type IN ('prediction_ban','full_ban') AND (ends_at IS NULL OR ends_at > NOW())",
+        [sanction.user_id, req.params.id]
+      )).rows;
+      if (otherActiveBans.length === 0) {
+        await pool.query('UPDATE users SET is_sanctioned = false, sanction_ends_at = null WHERE id = $1', [sanction.user_id]);
+      }
+    }
+    
+    res.json({message:'Sanction révoquée'});
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Delete a sanction record
+app.delete('/api/admin/sanctions/:id', auth, adminAuth, strictAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM sanctions WHERE id=$1', [req.params.id]);
+    res.json({message:'OK'});
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2',[v,k]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.get('/api/settings', async (req, res) => { try { const c=cacheGet('settings'); if(c) return res.json(c); const s={}; (await pool.query('SELECT * FROM site_settings')).rows.forEach(r=>s[r.setting_key]=r.setting_value); cacheSet('settings',s,300000); res.json(s); } catch(e) { res.status(500).json({error:'Erreur'}); }});
