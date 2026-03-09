@@ -117,24 +117,19 @@ const matchController = {
 
       await Match.setResult(matchId, team1_score, team2_score);
       const predictions = await Prediction.findByMatch(matchId);
+      const ScoringRule = require('../models/ScoringRule');
+      const rules = await ScoringRule.getAsObject();
 
       for (const pred of predictions) {
-        let points = 0;
-        if (pred.team1_score === team1_score && pred.team2_score === team2_score) {
-          points = 5; // exact score
-        } else {
-          const predWinner = pred.team1_score > pred.team2_score ? 1 : pred.team1_score < pred.team2_score ? 2 : 0;
-          const actualWinner = team1_score > team2_score ? 1 : team1_score < team2_score ? 2 : 0;
-          if (predWinner === actualWinner) {
-            points = actualWinner === 0 ? 3 : 2; // correct draw or winner
-          }
-        }
+        const oldPoints = pred.points_earned || 0;
+        const { points } = ScoringRule.calculatePoints(pred, { team1_score, team2_score }, rules);
         
         await Prediction.updatePoints(pred.id, points);
-        if (points > 0) {
+        const diff = points - oldPoints;
+        if (diff !== 0) {
           await pool.query(
-            'UPDATE users SET total_points = total_points + $1, correct_predictions = correct_predictions + 1 WHERE id = $2',
-            [points, pred.user_id]
+            'UPDATE users SET total_points = GREATEST(0, COALESCE(total_points, 0) + $1) WHERE id = $2',
+            [diff, pred.user_id]
           );
         }
       }
