@@ -74,6 +74,7 @@ const initDB = async () => {
     `CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL, type VARCHAR(50) NOT NULL, reason TEXT, match_ban_count INTEGER DEFAULT 0, minute INTEGER, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`,
     `CREATE TABLE IF NOT EXISTS point_adjustments (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, points INTEGER NOT NULL, reason TEXT, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`,
     `CREATE TABLE IF NOT EXISTS team_sanctions (id SERIAL PRIMARY KEY, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, points_deducted INTEGER NOT NULL DEFAULT 0, reason TEXT, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`,
+    `CREATE TABLE IF NOT EXISTS group_qualifications (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, group_name VARCHAR(10) NOT NULL, qualify_count INTEGER NOT NULL DEFAULT 2, UNIQUE(tournament_id, group_name))`,
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
@@ -589,6 +590,13 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     });
     Object.values(groups).forEach(arr => arr.sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf || a.name.localeCompare(b.name)));
 
+    // Get per-group qualification counts (admin-configurable)
+    let qualifications = {};
+    try {
+      const qRows = (await pool.query('SELECT group_name, qualify_count FROM group_qualifications WHERE tournament_id=$1', [tid])).rows;
+      qRows.forEach(q => { qualifications[q.group_name] = parseInt(q.qualify_count); });
+    } catch(e) {}
+
     // --- KNOCKOUT BRACKET ---
     const knockoutStages = ['Huitièmes', 'Quarts', 'Demi-finales', '3ème place', 'Finale'];
     const knockout = {};
@@ -611,7 +619,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     const sortedKnockout = {};
     knockoutStages.forEach(s => { if (knockout[s]) sortedKnockout[s] = knockout[s]; });
 
-    res.json({ groups, knockout: sortedKnockout });
+    res.json({ groups, knockout: sortedKnockout, qualifications });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
 });
 
@@ -834,6 +842,33 @@ app.delete('/api/admin/team-sanctions/:id', auth, adminAuth, async (req, res) =>
     cacheClear();
     res.json({message:'OK'});
   } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// === GROUP QUALIFICATIONS ===
+// Get qualification counts for a tournament
+app.get('/api/tournaments/:id/qualifications', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT group_name, qualify_count FROM group_qualifications WHERE tournament_id=$1', [req.params.id]);
+    const obj = {};
+    result.rows.forEach(r => { obj[r.group_name] = r.qualify_count; });
+    res.json(obj);
+  } catch(e) { res.json({}); }
+});
+
+// Set qualification count for a group
+app.put('/api/admin/tournaments/:id/qualifications', auth, adminAuth, async (req, res) => {
+  try {
+    const tid = req.params.id;
+    const { qualifications } = req.body; // { "A": 2, "B": 3, "C": 2 }
+    for (const [groupName, count] of Object.entries(qualifications || {})) {
+      await pool.query(
+        'INSERT INTO group_qualifications(tournament_id, group_name, qualify_count) VALUES($1,$2,$3) ON CONFLICT(tournament_id, group_name) DO UPDATE SET qualify_count=$3',
+        [tid, groupName, parseInt(count) || 2]
+      );
+    }
+    cacheClear();
+    res.json({message:'OK'});
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
 
