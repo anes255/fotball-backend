@@ -160,7 +160,7 @@ const calcPoints = async (pred, t1, t2, tournamentId) => {
   
   // Exact score = exclusive reward, no stacking
   if (isExact) {
-    return rules.exact_score || 5;
+    return rules.exact_score ?? 5;
   }
   
   let pts = 0;
@@ -168,12 +168,12 @@ const calcPoints = async (pred, t1, t2, tournamentId) => {
   
   // Correct winner or draw
   if (aW===pW) {
-    pts += aW===0?(rules.correct_draw||3):(rules.correct_winner||2);
+    pts += aW===0?(rules.correct_draw ?? 3):(rules.correct_winner ?? 2);
     // Goal difference bonus only when winner is correct
-    if ((t1-t2)===(pred.team1_score-pred.team2_score)) pts+=rules.correct_goal_diff||1;
+    if ((t1-t2)===(pred.team1_score-pred.team2_score)) pts+=rules.correct_goal_diff ?? 1;
     // Individual team goals bonus only when winner/draw is correct
-    if (pred.team1_score===t1) pts+=rules.one_team_goals||1;
-    if (pred.team2_score===t2) pts+=rules.one_team_goals||1;
+    if (pred.team1_score===t1) pts+=rules.one_team_goals ?? 1;
+    if (pred.team2_score===t2) pts+=rules.one_team_goals ?? 1;
   }
   // No points if winner prediction is wrong
   return pts;
@@ -350,7 +350,7 @@ app.get('/api/tournaments/:id/my-player-prediction', auth, async (req, res) => {
 
 app.post('/api/tournaments/:id/player-prediction', auth, async (req, res) => { try { const tid=req.params.id; const {best_player_id,best_goal_scorer_id}=req.body; const t=(await pool.query('SELECT lock_player_predictions FROM tournaments WHERE id=$1',[tid])).rows[0]; if(t?.lock_player_predictions) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalStarted=(await pool.query("SELECT 1 FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tid])).rows.length>0; if(finalStarted) return res.status(400).json({error:'La finale a commencé, prédictions fermées'}); res.json((await pool.query('INSERT INTO player_predictions(user_id,tournament_id,best_player_id,best_goal_scorer_id) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,tournament_id) DO UPDATE SET best_player_id=COALESCE($3,player_predictions.best_player_id),best_goal_scorer_id=COALESCE($4,player_predictions.best_goal_scorer_id) RETURNING *',[req.userId,tid,best_player_id||null,best_goal_scorer_id||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
-app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async (req, res) => { try { const tid=parseInt(req.params.id); const bpId=req.body.best_player_id?parseInt(req.body.best_player_id):null; const gsId=req.body.best_goal_scorer_id?parseInt(req.body.best_goal_scorer_id):null; await pool.query('UPDATE tournaments SET best_player_id=$1,best_goal_scorer_id=$2 WHERE id=$3',[bpId,gsId,tid]); const rules=await getTournamentRules(tid); const bpPts=rules.best_player||7; const gsPts=rules.best_goal_scorer||7; let tot=0; if(bpId){const c=(await pool.query('SELECT user_id FROM player_predictions WHERE tournament_id=$1 AND best_player_id=$2',[tid,bpId])).rows; for(const u of c){await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[bpPts,u.user_id]);tot++;}} if(gsId){const c=(await pool.query('SELECT user_id FROM player_predictions WHERE tournament_id=$1 AND best_goal_scorer_id=$2',[tid,gsId])).rows; for(const u of c){await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[gsPts,u.user_id]);tot++;}} const all=(await pool.query('SELECT * FROM player_predictions WHERE tournament_id=$1',[tid])).rows; for(const pp of all){let p=0; if(bpId&&pp.best_player_id===bpId)p+=bpPts; if(gsId&&pp.best_goal_scorer_id===gsId)p+=gsPts; await pool.query('UPDATE player_predictions SET points_earned=$1 WHERE id=$2',[p,pp.id]);} res.json({message:`Gagnants définis ! ${tot} récompense(s)`}); } catch(e) { console.error(e.message); res.status(500).json({error:'Erreur: '+e.message}); }});
+app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async (req, res) => { try { const tid=parseInt(req.params.id); const bpId=req.body.best_player_id?parseInt(req.body.best_player_id):null; const gsId=req.body.best_goal_scorer_id?parseInt(req.body.best_goal_scorer_id):null; await pool.query('UPDATE tournaments SET best_player_id=$1,best_goal_scorer_id=$2 WHERE id=$3',[bpId,gsId,tid]); const rules=await getTournamentRules(tid); const bpPts=rules.best_player??7; const gsPts=rules.best_goal_scorer??7; let tot=0; if(bpId){const c=(await pool.query('SELECT user_id FROM player_predictions WHERE tournament_id=$1 AND best_player_id=$2',[tid,bpId])).rows; for(const u of c){await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[bpPts,u.user_id]);tot++;}} if(gsId){const c=(await pool.query('SELECT user_id FROM player_predictions WHERE tournament_id=$1 AND best_goal_scorer_id=$2',[tid,gsId])).rows; for(const u of c){await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[gsPts,u.user_id]);tot++;}} const all=(await pool.query('SELECT * FROM player_predictions WHERE tournament_id=$1',[tid])).rows; for(const pp of all){let p=0; if(bpId&&pp.best_player_id===bpId)p+=bpPts; if(gsId&&pp.best_goal_scorer_id===gsId)p+=gsPts; await pool.query('UPDATE player_predictions SET points_earned=$1 WHERE id=$2',[p,pp.id]);} res.json({message:`Gagnants définis ! ${tot} récompense(s)`}); } catch(e) { console.error(e.message); res.status(500).json({error:'Erreur: '+e.message}); }});
 
 // Matches
 app.get('/api/matches/visible', async (req, res) => { try { const c=cacheGet('matches_vis'); if(c) return res.json(c); const d=(await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM matches m JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE m.status IN ('completed','live') OR (m.status='upcoming' AND m.match_date<=NOW()+INTERVAL '24 hours' AND m.match_date>NOW()) ORDER BY CASE WHEN m.status='live' THEN 0 WHEN m.status='upcoming' THEN 1 ELSE 2 END,match_date`)).rows; cacheSet('matches_vis',d,15000); res.json(d); } catch(e) { res.status(500).json({error:'Erreur'}); }});
@@ -377,7 +377,7 @@ app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
       // Bonus for exact final score
       if(isFinal && p.team1_score===team1_score && p.team2_score===team2_score){
         const rules=await getTournamentRules(match?.tournament_id);
-        pts+=(rules.final_exact_score||15);
+        pts+=(rules.final_exact_score??15);
       }
       const oldPts = p.points_earned || 0;
       await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]);
@@ -401,7 +401,7 @@ app.put('/api/matches/:id/result', auth, adminAuth, async (req, res) => {
       let pts=await calcPoints(p,team1_score,team2_score,match?.tournament_id);
       if(isFinal && p.team1_score===team1_score && p.team2_score===team2_score){
         const rules=await getTournamentRules(match?.tournament_id);
-        pts+=(rules.final_exact_score||15);
+        pts+=(rules.final_exact_score??15);
       }
       const oldPts = p.points_earned || 0;
       await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2',[pts,p.id]);
@@ -870,7 +870,7 @@ app.put('/api/admin/matches/:id/edit-score', auth, adminAuth, async (req, res) =
       let pts = await calcPoints(p, team1_score, team2_score, match.tournament_id);
       if (isFinal && p.team1_score === team1_score && p.team2_score === team2_score) {
         const rules = await getTournamentRules(match.tournament_id);
-        pts += (rules.final_exact_score || 15);
+        pts += (rules.final_exact_score ?? 15);
       }
       if (oldPts !== pts) {
         await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2', [pts, p.id]);
@@ -890,9 +890,9 @@ app.post('/api/admin/award-winner', auth, adminAuth, strictAdmin, async (req, re
   try {
     const {tournament_id,team_id,runner_up_team_id}=req.body;
     const rules=await getTournamentRules(tournament_id);
-    const pts=rules.tournament_winner||10;
-    const runnerPts=rules.tournament_runner_up||5;
-    const finalistPts=rules.tournament_finalist||3;
+    const pts=rules.tournament_winner??10;
+    const runnerPts=rules.tournament_runner_up??5;
+    const finalistPts=rules.tournament_finalist??3;
     let totalRewarded=0;
     // Winner predictions
     const winnerUserIds=new Set();
