@@ -73,6 +73,7 @@ const initDB = async () => {
     `CREATE TABLE IF NOT EXISTS goal_events (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, minute INTEGER, created_at TIMESTAMP DEFAULT NOW())`,
     `CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL, type VARCHAR(50) NOT NULL, reason TEXT, match_ban_count INTEGER DEFAULT 0, minute INTEGER, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`,
     `CREATE TABLE IF NOT EXISTS point_adjustments (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, points INTEGER NOT NULL, reason TEXT, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`,
+    `CREATE TABLE IF NOT EXISTS team_sanctions (id SERIAL PRIMARY KEY, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, points_deducted INTEGER NOT NULL DEFAULT 0, reason TEXT, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`,
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
@@ -546,7 +547,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     const stats = {};
     teams.forEach(t => {
       stats[t.team_id] = { team_id: t.team_id, name: t.name, flag_url: t.flag_url, group_name: t.group_name,
-        played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, gd: 0, points: 0 };
+        played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, gd: 0, points: 0, deduction: 0 };
     });
 
     allMatches.filter(m => m.status === 'completed').forEach(m => {
@@ -561,6 +562,23 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
         else { t1.drawn++; t2.drawn++; t1.points += 1; t2.points += 1; }
       }
     });
+
+    // Apply team sanctions (point deductions)
+    let teamSanctions = [];
+    try {
+      teamSanctions = (await pool.query(
+        'SELECT team_id, SUM(points_deducted) as total_deducted FROM team_sanctions WHERE tournament_id=$1 GROUP BY team_id',
+        [tid]
+      )).rows;
+    } catch(e) { /* table may not exist yet */ }
+    teamSanctions.forEach(s => {
+      if (stats[s.team_id]) {
+        const ded = parseInt(s.total_deducted) || 0;
+        stats[s.team_id].points -= ded;
+        stats[s.team_id].deduction = ded;
+      }
+    });
+
     Object.values(stats).forEach(s => { s.gd = s.gf - s.ga; });
 
     const groups = {};
@@ -758,6 +776,62 @@ app.put('/api/admin/sanctions/:id/revoke', auth, adminAuth, async (req, res) => 
 app.delete('/api/admin/sanctions/:id', auth, adminAuth, async (req, res) => {
   try {
     await pool.query('DELETE FROM sanctions WHERE id=$1', [req.params.id]);
+    res.json({message:'OK'});
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// === TEAM SANCTIONS (point deductions from group standings) ===
+// Get all team sanctions for a tournament
+app.get('/api/admin/team-sanctions/tournament/:tournamentId', auth, adminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ts.*, t.name as team_name, t.flag_url as team_flag, tour.name as tournament_name, c.name as created_by_name
+      FROM team_sanctions ts
+      JOIN teams t ON ts.team_id = t.id
+      JOIN tournaments tour ON ts.tournament_id = tour.id
+      LEFT JOIN users c ON ts.created_by = c.id
+      WHERE ts.tournament_id = $1
+      ORDER BY ts.created_at DESC
+    `, [req.params.tournamentId]);
+    res.json(result.rows);
+  } catch(e) { res.json([]); }
+});
+
+// Get all team sanctions across all tournaments
+app.get('/api/admin/team-sanctions', auth, adminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT ts.*, t.name as team_name, t.flag_url as team_flag, tour.name as tournament_name, c.name as created_by_name
+      FROM team_sanctions ts
+      JOIN teams t ON ts.team_id = t.id
+      JOIN tournaments tour ON ts.tournament_id = tour.id
+      LEFT JOIN users c ON ts.created_by = c.id
+      ORDER BY ts.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch(e) { res.json([]); }
+});
+
+// Create a team sanction
+app.post('/api/admin/team-sanctions', auth, adminAuth, async (req, res) => {
+  try {
+    const { team_id, tournament_id, points_deducted, reason } = req.body;
+    if (!team_id || !tournament_id || !points_deducted) return res.status(400).json({error:'Équipe, tournoi et points requis'});
+    const sanction = (await pool.query(
+      'INSERT INTO team_sanctions(team_id, tournament_id, points_deducted, reason, created_by) VALUES($1,$2,$3,$4,$5) RETURNING *',
+      [team_id, tournament_id, parseInt(points_deducted), reason || null, req.userId]
+    )).rows[0];
+    const team = (await pool.query('SELECT name FROM teams WHERE id=$1', [team_id])).rows[0];
+    cacheClear();
+    res.json({ ...sanction, team_name: team?.name });
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Delete a team sanction
+app.delete('/api/admin/team-sanctions/:id', auth, adminAuth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM team_sanctions WHERE id=$1', [req.params.id]);
+    cacheClear();
     res.json({message:'OK'});
   } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
