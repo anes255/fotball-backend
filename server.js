@@ -136,7 +136,8 @@ const initDB = async () => {
     ['font_heading','Bebas Neue'],['font_body','Poppins'],['border_radius','12'],
     ['header_name','Prediction World'],['header_logo',''],
     ['home_name','Prediction World'],['home_logo',''],
-    ['site_name','Prediction World'],['site_logo','']
+    ['site_name','Prediction World'],['site_logo',''],
+    ['prediction_cutoff_minutes','60']
   ];
   for (const [k,v] of defaults) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT DO NOTHING',[k,v]);
   console.log('DB initialized');
@@ -214,7 +215,34 @@ app.post('/api/admin/tournaments/:id/teams', auth, adminAuth, async (req, res) =
 
 // Tournament scoring rules
 app.get('/api/tournaments/:id/scoring-rules', async (req, res) => { try { res.json(await getTournamentRules(req.params.id)); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/admin/tournaments/:id/scoring-rules', auth, adminAuth, async (req, res) => { try { for(const [rt,pts] of Object.entries(req.body)) await pool.query('INSERT INTO tournament_scoring_rules(tournament_id,rule_type,points) VALUES($1,$2,$3) ON CONFLICT(tournament_id,rule_type) DO UPDATE SET points=$3',[req.params.id,rt,parseInt(pts)||0]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/admin/tournaments/:id/scoring-rules', auth, adminAuth, async (req, res) => {
+  try {
+    const tid = req.params.id;
+    for(const [rt,pts] of Object.entries(req.body)) await pool.query('INSERT INTO tournament_scoring_rules(tournament_id,rule_type,points) VALUES($1,$2,$3) ON CONFLICT(tournament_id,rule_type) DO UPDATE SET points=$3',[tid,rt,parseInt(pts)||0]);
+    // Auto-recalculate this tournament
+    const matches = (await pool.query("SELECT * FROM matches WHERE tournament_id=$1 AND status='completed'", [tid])).rows;
+    let totalUpdated = 0;
+    const userPointsMap = {};
+    for (const m of matches) {
+      const preds = (await pool.query('SELECT * FROM predictions WHERE match_id=$1', [m.id])).rows;
+      for (const p of preds) {
+        const oldPts = p.points_earned || 0;
+        const newPts = await calcPoints(p, m.team1_score, m.team2_score, tid);
+        if (oldPts !== newPts) {
+          await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2', [newPts, p.id]);
+          if (!userPointsMap[p.user_id]) userPointsMap[p.user_id] = 0;
+          userPointsMap[p.user_id] += (newPts - oldPts);
+          totalUpdated++;
+        }
+      }
+    }
+    for (const [uid, diff] of Object.entries(userPointsMap)) {
+      await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2', [diff, uid]);
+    }
+    cacheClear('lb');
+    res.json({message:`Règles sauvegardées. ${totalUpdated} pronostics recalculés.`, recalculated: totalUpdated});
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
 
 // Recalculate all scores for a tournament after rule changes
 app.post('/api/admin/tournaments/:id/recalculate', auth, adminAuth, async (req, res) => {
@@ -478,7 +506,13 @@ app.delete('/api/admin/tournaments/:id/bracket', auth, adminAuth, async (req, re
 
 // Predictions
 app.get('/api/predictions', auth, async (req, res) => { try { res.json((await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY m.match_date DESC`,[req.userId])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming'||new Date(m.match_date)<=new Date()) return res.status(400).json({error:'Pronostics fermés'}); const t=(await pool.query('SELECT lock_match_predictions FROM tournaments WHERE id=$1',[m.tournament_id])).rows[0]; if(t?.lock_match_predictions) return res.status(400).json({error:'Pronostics verrouillés par l\'admin'}); res.json((await pool.query('INSERT INTO predictions(user_id,match_id,team1_score,team2_score) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,match_id) DO UPDATE SET team1_score=$3,team2_score=$4 RETURNING *',[req.userId,match_id,team1_score,team2_score])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming') return res.status(400).json({error:'Pronostics fermés'});
+    // Get cutoff minutes from settings (default 60)
+    let cutoffMinutes = 60;
+    try { const cutoffRow = (await pool.query("SELECT setting_value FROM site_settings WHERE setting_key='prediction_cutoff_minutes'")).rows[0]; if(cutoffRow) cutoffMinutes = parseInt(cutoffRow.setting_value) || 60; } catch(e) {}
+    const cutoffTime = new Date(new Date(m.match_date).getTime() - cutoffMinutes * 60000);
+    if(new Date() >= cutoffTime) return res.status(400).json({error:`Pronostics fermés (${cutoffMinutes} min avant le match)`});
+    const t=(await pool.query('SELECT lock_match_predictions FROM tournaments WHERE id=$1',[m.tournament_id])).rows[0]; if(t?.lock_match_predictions) return res.status(400).json({error:'Pronostics verrouillés par l\'admin'}); res.json((await pool.query('INSERT INTO predictions(user_id,match_id,team1_score,team2_score) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,match_id) DO UPDATE SET team1_score=$3,team2_score=$4 RETURNING *',[req.userId,match_id,team1_score,team2_score])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.get('/api/users/:id/predictions', async (req, res) => {
   try {
@@ -715,9 +749,55 @@ app.delete('/api/admin/sanctions/:id', auth, adminAuth, async (req, res) => {
 
 
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2',[v,k]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+
+// Save global scoring rules + auto-recalculate ALL tournaments
+app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, res) => {
+  try {
+    for(const [k,v] of Object.entries(req.body)) await pool.query('UPDATE scoring_rules SET points=$1 WHERE rule_type=$2',[v,k]);
+    // Auto-recalculate all tournaments that use global rules (no tournament-specific overrides)
+    const allTournaments = (await pool.query('SELECT id FROM tournaments')).rows;
+    let totalUpdated = 0;
+    for (const tour of allTournaments) {
+      const hasOverrides = (await pool.query('SELECT COUNT(*) as c FROM tournament_scoring_rules WHERE tournament_id=$1', [tour.id])).rows[0]?.c > 0;
+      // Recalc tournaments that either have no overrides, or recalc all to be safe
+      const matches = (await pool.query("SELECT * FROM matches WHERE tournament_id=$1 AND status='completed'", [tour.id])).rows;
+      const userPointsMap = {};
+      for (const m of matches) {
+        const preds = (await pool.query('SELECT * FROM predictions WHERE match_id=$1', [m.id])).rows;
+        for (const p of preds) {
+          const oldPts = p.points_earned || 0;
+          const newPts = await calcPoints(p, m.team1_score, m.team2_score, tour.id);
+          if (oldPts !== newPts) {
+            await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2', [newPts, p.id]);
+            if (!userPointsMap[p.user_id]) userPointsMap[p.user_id] = 0;
+            userPointsMap[p.user_id] += (newPts - oldPts);
+            totalUpdated++;
+          }
+        }
+      }
+      for (const [uid, diff] of Object.entries(userPointsMap)) {
+        await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2', [diff, uid]);
+      }
+    }
+    cacheClear('lb');
+    res.json({message:`Règles sauvegardées. ${totalUpdated} pronostics recalculés.`, recalculated: totalUpdated});
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Admin: manually adjust user points (add or remove)
+app.post('/api/admin/users/:id/adjust-points', auth, adminAuth, strictAdmin, async (req, res) => {
+  try {
+    const { points, reason } = req.body;
+    const amount = parseInt(points);
+    if (!amount || amount === 0) return res.status(400).json({error:'Montant invalide'});
+    const user = (await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2 RETURNING id,name,total_points', [amount, req.params.id])).rows[0];
+    if (!user) return res.status(404).json({error:'Utilisateur non trouvé'});
+    res.json({message:`${amount > 0 ? '+' : ''}${amount} points pour ${user.name}. Total: ${user.total_points}`, user});
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
 app.get('/api/settings', async (req, res) => { try { const c=cacheGet('settings'); if(c) return res.json(c); const s={}; (await pool.query('SELECT * FROM site_settings')).rows.forEach(r=>s[r.setting_key]=r.setting_value); cacheSet('settings',s,300000); res.json(s); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/admin/settings', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2',[k,v]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/admin/settings', auth, adminAuth, strictAdmin, async (req, res) => { try { for(const [k,v] of Object.entries(req.body)) await pool.query('INSERT INTO site_settings(setting_key,setting_value) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET setting_value=$2',[k,v]); cacheClear('settings'); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.post('/api/admin/tournaments/:id/start', auth, adminAuth, async (req, res) => { try { await pool.query('UPDATE tournaments SET has_started=true WHERE id=$1',[req.params.id]); res.json({message:'Tournoi démarré !'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.post('/api/admin/award-winner', auth, adminAuth, strictAdmin, async (req, res) => {
