@@ -72,6 +72,7 @@ const initDB = async () => {
     `CREATE TABLE IF NOT EXISTS player_predictions (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, best_player_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, best_goal_scorer_id INTEGER REFERENCES tournament_players(id) ON DELETE SET NULL, points_earned INTEGER DEFAULT 0, UNIQUE(user_id, tournament_id))`,
     `CREATE TABLE IF NOT EXISTS goal_events (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, minute INTEGER, created_at TIMESTAMP DEFAULT NOW())`,
     `CREATE TABLE IF NOT EXISTS sanctions (id SERIAL PRIMARY KEY, player_id INTEGER REFERENCES tournament_players(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, match_id INTEGER REFERENCES matches(id) ON DELETE SET NULL, type VARCHAR(50) NOT NULL, reason TEXT, match_ban_count INTEGER DEFAULT 0, minute INTEGER, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW(), is_active BOOLEAN DEFAULT TRUE)`,
+    `CREATE TABLE IF NOT EXISTS point_adjustments (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, points INTEGER NOT NULL, reason TEXT, created_by INTEGER REFERENCES users(id), created_at TIMESTAMP DEFAULT NOW())`,
   ];
   for (const sql of tables) { try { await pool.query(sql); } catch(e) { console.log('Table note:', e.message); } }
 
@@ -597,10 +598,10 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
 });
 
 // Leaderboard - computed from predictions
-app.get('/api/leaderboard', async (req, res) => { try { const c=cacheGet('lb'); if(c) return res.json(c); const d=(await pool.query(`SELECT u.id,u.name,u.avatar_url,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows; cacheSet('lb',d,30000); res.json(d); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+app.get('/api/leaderboard', async (req, res) => { try { const c=cacheGet('lb'); if(c) return res.json(c); const d=(await pool.query(`SELECT u.id,u.name,u.avatar_url,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0)+COALESCE((SELECT SUM(pa.points) FROM point_adjustments pa WHERE pa.user_id=u.id),0) AS total_points,(SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u ORDER BY total_points DESC,u.name`)).rows; cacheSet('lb',d,30000); res.json(d); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
 
 // Per-tournament leaderboard with full stats
-app.get('/api/leaderboard/tournament/:id', async (req, res) => { try { const tid=req.params.id; res.json((await pool.query(`SELECT * FROM (SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.tournament_id=$1 AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id AND twp.tournament_id=$1),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id AND pp.tournament_id=$1),0) AS total_points,(SELECT COUNT(*) FROM predictions p2 JOIN matches m2 ON p2.match_id=m2.id WHERE p2.user_id=u.id AND m2.tournament_id=$1) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.tournament_id=$1 AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.tournament_id=$1 AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.tournament_id=$1 AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u) sub WHERE sub.total_points>0 OR sub.total_predictions>0 ORDER BY sub.total_points DESC,sub.name`,[tid])).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
+app.get('/api/leaderboard/tournament/:id', async (req, res) => { try { const tid=req.params.id; res.json((await pool.query(`SELECT * FROM (SELECT u.id,u.name,COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.tournament_id=$1 AND m.status='completed'),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id AND twp.tournament_id=$1),0)+COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id AND pp.tournament_id=$1),0)+COALESCE((SELECT SUM(pa.points) FROM point_adjustments pa WHERE pa.user_id=u.id AND pa.tournament_id=$1),0) AS total_points,(SELECT COUNT(*) FROM predictions p2 JOIN matches m2 ON p2.match_id=m2.id WHERE p2.user_id=u.id AND m2.tournament_id=$1) as total_predictions,(SELECT COUNT(*) FROM predictions p3 JOIN matches m3 ON p3.match_id=m3.id WHERE p3.user_id=u.id AND m3.tournament_id=$1 AND m3.status='completed') as completed_predictions,(SELECT COUNT(*) FROM predictions p4 JOIN matches m4 ON p4.match_id=m4.id WHERE p4.user_id=u.id AND m4.tournament_id=$1 AND m4.status='completed' AND p4.points_earned>0) as correct_predictions,(SELECT COUNT(*) FROM predictions p5 JOIN matches m5 ON p5.match_id=m5.id WHERE p5.user_id=u.id AND m5.tournament_id=$1 AND m5.status='completed' AND p5.team1_score=m5.team1_score AND p5.team2_score=m5.team2_score) as exact_predictions FROM users u) sub WHERE sub.total_points>0 OR sub.total_predictions>0 ORDER BY sub.total_points DESC,sub.name`,[tid])).rows); } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }});
 
 // Daily correct predictions - users who got it right today
 app.get('/api/daily-winners', async (req, res) => {
@@ -636,7 +637,21 @@ app.get('/api/daily-winners', async (req, res) => {
 });
 
 // Admin
-app.get('/api/admin/users', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT id,name,phone,is_admin,is_employee,total_points,created_at,avatar_url FROM users ORDER BY total_points DESC NULLS LAST')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.get('/api/admin/users', auth, adminAuth, async (req, res) => {
+  try {
+    const d = (await pool.query(`
+      SELECT u.id, u.name, u.phone, u.is_admin, u.is_employee, u.created_at, u.avatar_url,
+        COALESCE((SELECT SUM(p.points_earned) FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=u.id AND m.status='completed'),0)
+        + COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0)
+        + COALESCE((SELECT SUM(pp.points_earned) FROM player_predictions pp WHERE pp.user_id=u.id),0)
+        + COALESCE((SELECT SUM(pa.points) FROM point_adjustments pa WHERE pa.user_id=u.id),0)
+        AS total_points,
+        (SELECT COUNT(*) FROM predictions WHERE user_id=u.id) as total_predictions
+      FROM users u ORDER BY total_points DESC NULLS LAST, u.name
+    `)).rows;
+    res.json(d);
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
 app.put('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { const {is_admin,is_employee,total_points}=req.body; res.json((await pool.query('UPDATE users SET is_admin=COALESCE($1,is_admin),is_employee=COALESCE($2,is_employee),total_points=COALESCE($3,total_points) WHERE id=$4 RETURNING *',[is_admin,is_employee,total_points,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/admin/users/:id', auth, adminAuth, strictAdmin, async (req, res) => { try { await pool.query('DELETE FROM users WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
@@ -784,16 +799,87 @@ app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, re
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
-// Admin: manually adjust user points (add or remove)
+// Admin: per-tournament point adjustment
 app.post('/api/admin/users/:id/adjust-points', auth, adminAuth, strictAdmin, async (req, res) => {
   try {
-    const { points, reason } = req.body;
+    const { points, reason, tournament_id } = req.body;
     const amount = parseInt(points);
     if (!amount || amount === 0) return res.status(400).json({error:'Montant invalide'});
-    const user = (await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2 RETURNING id,name,total_points', [amount, req.params.id])).rows[0];
-    if (!user) return res.status(404).json({error:'Utilisateur non trouvé'});
-    res.json({message:`${amount > 0 ? '+' : ''}${amount} points pour ${user.name}. Total: ${user.total_points}`, user});
+    if (!tournament_id) return res.status(400).json({error:'Tournoi requis'});
+    await pool.query(
+      'INSERT INTO point_adjustments(user_id, tournament_id, points, reason, created_by) VALUES($1,$2,$3,$4,$5)',
+      [req.params.id, tournament_id, amount, reason || null, req.userId]
+    );
+    cacheClear('lb');
+    const user = (await pool.query('SELECT name FROM users WHERE id=$1', [req.params.id])).rows[0];
+    res.json({message:`${amount > 0 ? '+' : ''}${amount} points pour ${user?.name || 'Utilisateur'}`});
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Get per-tournament breakdown for a user
+app.get('/api/admin/users/:id/tournament-points', auth, adminAuth, async (req, res) => {
+  try {
+    const uid = req.params.id;
+    const tournaments = (await pool.query('SELECT id, name FROM tournaments ORDER BY start_date DESC')).rows;
+    const result = [];
+    for (const t of tournaments) {
+      const predPts = (await pool.query("SELECT COALESCE(SUM(p.points_earned),0) as pts FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=$1 AND m.tournament_id=$2 AND m.status='completed'", [uid, t.id])).rows[0]?.pts || 0;
+      const winnerPts = (await pool.query("SELECT COALESCE(SUM(points_earned),0) as pts FROM tournament_winner_predictions WHERE user_id=$1 AND tournament_id=$2", [uid, t.id])).rows[0]?.pts || 0;
+      const playerPts = (await pool.query("SELECT COALESCE(SUM(points_earned),0) as pts FROM player_predictions WHERE user_id=$1 AND tournament_id=$2", [uid, t.id])).rows[0]?.pts || 0;
+      const adjPts = (await pool.query("SELECT COALESCE(SUM(points),0) as pts FROM point_adjustments WHERE user_id=$1 AND tournament_id=$2", [uid, t.id])).rows[0]?.pts || 0;
+      const total = parseInt(predPts) + parseInt(winnerPts) + parseInt(playerPts) + parseInt(adjPts);
+      if (total !== 0 || parseInt(adjPts) !== 0) {
+        result.push({ tournament_id: t.id, tournament_name: t.name, prediction_points: parseInt(predPts), winner_points: parseInt(winnerPts), player_points: parseInt(playerPts), adjustment_points: parseInt(adjPts), total });
+      }
+    }
+    // Get adjustments history
+    const adjustments = (await pool.query(`
+      SELECT pa.*, tour.name as tournament_name, c.name as created_by_name
+      FROM point_adjustments pa
+      JOIN tournaments tour ON pa.tournament_id = tour.id
+      LEFT JOIN users c ON pa.created_by = c.id
+      WHERE pa.user_id = $1
+      ORDER BY pa.created_at DESC
+    `, [uid])).rows;
+    res.json({ tournaments: result, adjustments });
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Delete a point adjustment
+app.delete('/api/admin/point-adjustments/:id', auth, adminAuth, strictAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM point_adjustments WHERE id=$1', [req.params.id]);
+    cacheClear('lb');
+    res.json({message:'OK'});
   } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Admin: edit score of a completed match (recalculates all predictions)
+app.put('/api/admin/matches/:id/edit-score', auth, adminAuth, async (req, res) => {
+  try {
+    const { team1_score, team2_score } = req.body;
+    const match = (await pool.query('SELECT * FROM matches WHERE id=$1', [req.params.id])).rows[0];
+    if (!match) return res.status(404).json({error:'Match non trouvé'});
+    await pool.query('UPDATE matches SET team1_score=$1, team2_score=$2 WHERE id=$3', [team1_score, team2_score, req.params.id]);
+    // Recalculate all predictions for this match
+    const preds = (await pool.query('SELECT * FROM predictions WHERE match_id=$1', [req.params.id])).rows;
+    const isFinal = match.bracket_round===2 || (match.stage && match.stage.toLowerCase().includes('finale') && !match.stage.toLowerCase().includes('demi'));
+    let updated = 0;
+    for (const p of preds) {
+      const oldPts = p.points_earned || 0;
+      let pts = await calcPoints(p, team1_score, team2_score, match.tournament_id);
+      if (isFinal && p.team1_score === team1_score && p.team2_score === team2_score) {
+        const rules = await getTournamentRules(match.tournament_id);
+        pts += (rules.final_exact_score || 15);
+      }
+      if (oldPts !== pts) {
+        await pool.query('UPDATE predictions SET points_earned=$1 WHERE id=$2', [pts, p.id]);
+        updated++;
+      }
+    }
+    cacheClear('lb');
+    res.json({message:`Score modifié. ${updated} pronostics recalculés.`, updated});
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
 app.get('/api/settings', async (req, res) => { try { const c=cacheGet('settings'); if(c) return res.json(c); const s={}; (await pool.query('SELECT * FROM site_settings')).rows.forEach(r=>s[r.setting_key]=r.setting_value); cacheSet('settings',s,300000); res.json(s); } catch(e) { res.status(500).json({error:'Erreur'}); }});
