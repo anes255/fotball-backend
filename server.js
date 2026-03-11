@@ -1138,21 +1138,25 @@ app.get('/api/matches/:id/predictions', async (req, res) => {
       draw_pct: totalPreds ? Math.round((draws / totalPreds) * 100) : 0,
     };
     
-    // Only show individual predictions after match started
-    if (match.status === 'upcoming') return res.json({ predictions: [], stats });
+    // Show individual predictions for all match statuses (live, completed, upcoming)
+    // For upcoming: show who predicted what (no scores revealed yet until match starts)
     
     const result = await pool.query(`
       SELECT p.team1_score, p.team2_score, p.points_earned, u.id as user_id, u.name as user_name, u.avatar_url,
-        CASE WHEN p.team1_score=m.team1_score AND p.team2_score=m.team2_score THEN 'exact'
-             WHEN (p.team1_score>p.team2_score AND m.team1_score>m.team2_score) OR (p.team1_score<p.team2_score AND m.team1_score<m.team2_score) OR (p.team1_score=p.team2_score AND m.team1_score=m.team2_score) THEN 'correct'
-             ELSE 'wrong' END as prediction_type
+        $2 as match_status,
+        CASE 
+          WHEN $2 = 'completed' AND p.team1_score=m.team1_score AND p.team2_score=m.team2_score THEN 'exact'
+          WHEN $2 = 'completed' AND ((p.team1_score>p.team2_score AND m.team1_score>m.team2_score) OR (p.team1_score<p.team2_score AND m.team1_score<m.team2_score) OR (p.team1_score=p.team2_score AND m.team1_score=m.team2_score)) THEN 'correct'
+          WHEN $2 = 'completed' THEN 'wrong'
+          ELSE 'pending'
+        END as prediction_type
       FROM predictions p
       JOIN users u ON p.user_id = u.id
       JOIN matches m ON p.match_id = m.id
       WHERE p.match_id = $1
-      ORDER BY p.points_earned DESC, u.name
-    `, [req.params.id]);
-    res.json({ predictions: result.rows, stats });
+      ORDER BY u.name
+    `, [req.params.id, match.status]);
+    res.json({ predictions: result.rows, stats, match_status: match.status });
   } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
 
