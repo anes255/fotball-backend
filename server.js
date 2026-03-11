@@ -116,6 +116,8 @@ const initDB = async () => {
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS next_match_slot INTEGER',
     'ALTER TABLE tournament_players ADD COLUMN IF NOT EXISTS goals INTEGER DEFAULT 0',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS predictions_locked BOOLEAN DEFAULT FALSE',
+    'ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_note TEXT',
+    'ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_permissions JSONB DEFAULT \'{}\'',
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
@@ -532,7 +534,7 @@ app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,t
 app.get('/api/users/:id/predictions', async (req, res) => {
   try {
     const user=(await pool.query('SELECT id,name,total_points FROM users WHERE id=$1',[req.params.id])).rows[0];
-    const predictions=(await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 AND m.status='completed' ORDER BY tour.name,m.match_date DESC`,[req.params.id])).rows;
+    const predictions=(await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY tour.name,m.match_date DESC`,[req.params.id])).rows;
     const winnerPred=(await pool.query('SELECT twp.*,t.name as team_name,t.flag_url,tour.name as tournament_name,twp.tournament_id FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id JOIN tournaments tour ON twp.tournament_id=tour.id WHERE twp.user_id=$1',[req.params.id])).rows;
     const playerPred=(await pool.query(`SELECT pp.*,tour.name as tournament_name,pp.tournament_id,bp.name as best_player_name,bpt.name as best_player_team,gs.name as best_goal_scorer_name,gst.name as best_goal_scorer_team FROM player_predictions pp JOIN tournaments tour ON pp.tournament_id=tour.id LEFT JOIN tournament_players bp ON pp.best_player_id=bp.id LEFT JOIN teams bpt ON bp.team_id=bpt.id LEFT JOIN tournament_players gs ON pp.best_goal_scorer_id=gs.id LEFT JOIN teams gst ON gs.team_id=gst.id WHERE pp.user_id=$1`,[req.params.id])).rows;
     res.json({user,predictions,winnerPredictions:winnerPred,playerPredictions:playerPred});
@@ -1084,6 +1086,33 @@ app.put('/api/admin/matches/:id/lock-predictions', auth, adminAuth, async (req, 
     const match = (await pool.query('UPDATE matches SET predictions_locked=$1 WHERE id=$2 RETURNING id,predictions_locked', [!!locked, req.params.id])).rows[0];
     cacheClear('matches');
     res.json({ message: locked ? 'Pronostics verrouillés' : 'Pronostics déverrouillés', match });
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Match note (suspended players, etc.)
+app.put('/api/admin/matches/:id/note', auth, adminAuth, async (req, res) => {
+  try {
+    const { note } = req.body;
+    const match = (await pool.query('UPDATE matches SET match_note=$1 WHERE id=$2 RETURNING id,match_note', [note || null, req.params.id])).rows[0];
+    cacheClear('matches');
+    res.json({ message: 'Note mise à jour', match });
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Employee permissions
+app.put('/api/admin/users/:id/permissions', auth, adminAuth, async (req, res) => {
+  try {
+    const { permissions } = req.body;
+    const result = (await pool.query('UPDATE users SET employee_permissions=$1 WHERE id=$2 RETURNING id,name,employee_permissions', [JSON.stringify(permissions || {}), req.params.id])).rows[0];
+    res.json(result);
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Get employee permissions
+app.get('/api/admin/users/:id/permissions', auth, adminAuth, async (req, res) => {
+  try {
+    const result = (await pool.query('SELECT id,name,employee_permissions FROM users WHERE id=$1', [req.params.id])).rows[0];
+    res.json(result);
   } catch(e) { res.status(500).json({error:'Erreur'}); }
 });
 
