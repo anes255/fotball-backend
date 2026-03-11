@@ -115,6 +115,7 @@ const initDB = async () => {
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS next_match_id INTEGER',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS next_match_slot INTEGER',
     'ALTER TABLE tournament_players ADD COLUMN IF NOT EXISTS goals INTEGER DEFAULT 0',
+    'ALTER TABLE matches ADD COLUMN IF NOT EXISTS predictions_locked BOOLEAN DEFAULT FALSE',
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
@@ -182,6 +183,16 @@ const calcPoints = async (pred, t1, t2, tournamentId) => {
 };
 
 app.get('/', (req, res) => res.json({ name: 'Prediction World API', version: '4.0' }));
+
+// Helper: check if user is within 1-hour new-user grace period
+const isNewUserGracePeriod = async (userId) => {
+  try {
+    const user = (await pool.query('SELECT created_at FROM users WHERE id=$1', [userId])).rows[0];
+    if (!user) return false;
+    const hourAgo = new Date(Date.now() - 3600000);
+    return new Date(user.created_at) > hourAgo;
+  } catch(e) { return false; }
+};
 
 // Auth
 app.post('/api/auth/register', async (req, res) => { try { const {name,phone,password,avatar_url}=req.body||{}; if(!name||!phone||!password) return res.status(400).json({error:'Champs requis'}); const clean=phone.replace(/[\s-]/g,''); if(!/^(05|06|07)\d{8}$/.test(clean)) return res.status(400).json({error:'Numéro invalide'}); if((await pool.query('SELECT id FROM users WHERE phone=$1',[clean])).rows.length) return res.status(400).json({error:'Numéro déjà utilisé'}); const r=await pool.query('INSERT INTO users(name,phone,password,avatar_url) VALUES($1,$2,$3,$4) RETURNING *',[name,clean,await bcrypt.hash(password,10),avatar_url||null]); res.json({token:jwt.sign({userId:r.rows[0].id},JWT_SECRET,{expiresIn:'30d'}),user:{...r.rows[0],password:undefined}}); } catch(e) { console.error(e); res.status(500).json({error:'Erreur serveur'}); }});
@@ -345,12 +356,12 @@ app.get('/api/tournaments/:id/goalscorers', async (req, res) => { try { const k=
 
 // Finalist predictions (predict team that reaches the final)
 app.get('/api/finalist/:tournamentId', auth, async (req, res) => { try { res.json((await pool.query('SELECT fp.*,t.name as team_name,t.flag_url FROM finalist_predictions fp JOIN teams t ON fp.team_id=t.id WHERE fp.user_id=$1 AND fp.tournament_id=$2',[req.userId,req.params.tournamentId])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/finalist', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const t=(await pool.query('SELECT lock_finalist_prediction FROM tournaments WHERE id=$1',[tournament_id])).rows[0]; if(t?.lock_finalist_prediction) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalMatch=(await pool.query("SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tournament_id])).rows[0]; if(finalMatch) return res.status(400).json({error:'La finale a commencé'}); const existing=(await pool.query('SELECT id FROM finalist_predictions WHERE user_id=$1 AND tournament_id=$2',[req.userId,tournament_id])).rows[0]; if(existing) return res.status(400).json({error:'Prédiction déjà confirmée'}); res.json((await pool.query('INSERT INTO finalist_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/finalist', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const t=(await pool.query('SELECT lock_finalist_prediction FROM tournaments WHERE id=$1',[tournament_id])).rows[0]; const isNewUser = await isNewUserGracePeriod(req.userId); if(t?.lock_finalist_prediction && !isNewUser) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalMatch=(await pool.query("SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tournament_id])).rows[0]; if(finalMatch && !isNewUser) return res.status(400).json({error:'La finale a commencé'}); const existing=(await pool.query('SELECT id FROM finalist_predictions WHERE user_id=$1 AND tournament_id=$2',[req.userId,tournament_id])).rows[0]; if(existing) return res.status(400).json({error:'Prédiction déjà confirmée'}); res.json((await pool.query('INSERT INTO finalist_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 // Player predictions
 app.get('/api/tournaments/:id/my-player-prediction', auth, async (req, res) => { try { res.json((await pool.query('SELECT pp.*,bp.name as best_player_name,bp.photo_url as best_player_photo,bp.position as best_player_position,bpt.name as best_player_team,bpt.flag_url as best_player_team_flag,gs.name as best_goal_scorer_name,gs.photo_url as best_goal_scorer_photo,gs.position as best_goal_scorer_position,gst.name as best_goal_scorer_team,gst.flag_url as best_goal_scorer_team_flag FROM player_predictions pp LEFT JOIN tournament_players bp ON pp.best_player_id=bp.id LEFT JOIN teams bpt ON bp.team_id=bpt.id LEFT JOIN tournament_players gs ON pp.best_goal_scorer_id=gs.id LEFT JOIN teams gst ON gs.team_id=gst.id WHERE pp.user_id=$1 AND pp.tournament_id=$2',[req.userId,req.params.id])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
-app.post('/api/tournaments/:id/player-prediction', auth, async (req, res) => { try { const tid=req.params.id; const {best_player_id,best_goal_scorer_id}=req.body; const t=(await pool.query('SELECT lock_player_predictions FROM tournaments WHERE id=$1',[tid])).rows[0]; if(t?.lock_player_predictions) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalStarted=(await pool.query("SELECT 1 FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tid])).rows.length>0; if(finalStarted) return res.status(400).json({error:'La finale a commencé, prédictions fermées'}); res.json((await pool.query('INSERT INTO player_predictions(user_id,tournament_id,best_player_id,best_goal_scorer_id) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,tournament_id) DO UPDATE SET best_player_id=COALESCE($3,player_predictions.best_player_id),best_goal_scorer_id=COALESCE($4,player_predictions.best_goal_scorer_id) RETURNING *',[req.userId,tid,best_player_id||null,best_goal_scorer_id||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/tournaments/:id/player-prediction', auth, async (req, res) => { try { const tid=req.params.id; const {best_player_id,best_goal_scorer_id}=req.body; const t=(await pool.query('SELECT lock_player_predictions FROM tournaments WHERE id=$1',[tid])).rows[0]; const isNewUser = await isNewUserGracePeriod(req.userId); if(t?.lock_player_predictions && !isNewUser) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalStarted=(await pool.query("SELECT 1 FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tid])).rows.length>0; if(finalStarted && !isNewUser) return res.status(400).json({error:'La finale a commencé, prédictions fermées'}); res.json((await pool.query('INSERT INTO player_predictions(user_id,tournament_id,best_player_id,best_goal_scorer_id) VALUES($1,$2,$3,$4) ON CONFLICT(user_id,tournament_id) DO UPDATE SET best_player_id=COALESCE($3,player_predictions.best_player_id),best_goal_scorer_id=COALESCE($4,player_predictions.best_goal_scorer_id) RETURNING *',[req.userId,tid,best_player_id||null,best_goal_scorer_id||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.post('/api/admin/tournaments/:id/set-player-winners', auth, adminAuth, async (req, res) => { try { const tid=parseInt(req.params.id); const bpId=req.body.best_player_id?parseInt(req.body.best_player_id):null; const gsId=req.body.best_goal_scorer_id?parseInt(req.body.best_goal_scorer_id):null; await pool.query('UPDATE tournaments SET best_player_id=$1,best_goal_scorer_id=$2 WHERE id=$3',[bpId,gsId,tid]); const rules=await getTournamentRules(tid); const bpPts=rules.best_player??7; const gsPts=rules.best_goal_scorer??7; let tot=0; if(bpId){const c=(await pool.query('SELECT user_id FROM player_predictions WHERE tournament_id=$1 AND best_player_id=$2',[tid,bpId])).rows; for(const u of c){await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[bpPts,u.user_id]);tot++;}} if(gsId){const c=(await pool.query('SELECT user_id FROM player_predictions WHERE tournament_id=$1 AND best_goal_scorer_id=$2',[tid,gsId])).rows; for(const u of c){await pool.query('UPDATE users SET total_points=COALESCE(total_points,0)+$1 WHERE id=$2',[gsPts,u.user_id]);tot++;}} const all=(await pool.query('SELECT * FROM player_predictions WHERE tournament_id=$1',[tid])).rows; for(const pp of all){let p=0; if(bpId&&pp.best_player_id===bpId)p+=bpPts; if(gsId&&pp.best_goal_scorer_id===gsId)p+=gsPts; await pool.query('UPDATE player_predictions SET points_earned=$1 WHERE id=$2',[p,pp.id]);} res.json({message:`Gagnants définis ! ${tot} récompense(s)`}); } catch(e) { console.error(e.message); res.status(500).json({error:'Erreur: '+e.message}); }});
 
@@ -509,7 +520,8 @@ app.delete('/api/admin/tournaments/:id/bracket', auth, adminAuth, async (req, re
 
 // Predictions
 app.get('/api/predictions', auth, async (req, res) => { try { res.json((await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY m.match_date DESC`,[req.userId])).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; const m=(await pool.query('SELECT status,match_date,tournament_id FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming') return res.status(400).json({error:'Pronostics fermés'});
+app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,team1_score,team2_score}=req.body; const m=(await pool.query('SELECT status,match_date,tournament_id,predictions_locked FROM matches WHERE id=$1',[match_id])).rows[0]; if(!m||m.status!=='upcoming') return res.status(400).json({error:'Pronostics fermés'});
+    if(m.predictions_locked) return res.status(400).json({error:'Pronostics verrouillés pour ce match'});
     // Get cutoff minutes from settings (default 60)
     let cutoffMinutes = 60;
     try { const cutoffRow = (await pool.query("SELECT setting_value FROM site_settings WHERE setting_key='prediction_cutoff_minutes'")).rows[0]; if(cutoffRow) cutoffMinutes = parseInt(cutoffRow.setting_value) || 60; } catch(e) {}
@@ -529,7 +541,7 @@ app.get('/api/users/:id/predictions', async (req, res) => {
 
 // Tournament winner
 app.get('/api/tournament-winner/:tournamentId', auth, async (req, res) => { try { res.json((await pool.query('SELECT twp.*,t.name as team_name,t.flag_url FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id WHERE twp.user_id=$1 AND twp.tournament_id=$2',[req.userId,req.params.tournamentId])).rows[0]||null); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.post('/api/tournament-winner', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const t=(await pool.query('SELECT lock_winner_prediction FROM tournaments WHERE id=$1',[tournament_id])).rows[0]; if(t?.lock_winner_prediction) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalMatch=(await pool.query("SELECT id,status FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tournament_id])).rows[0]; if(finalMatch) return res.status(400).json({error:'La finale a commencé, prédictions fermées'}); const existing=(await pool.query('SELECT id FROM tournament_winner_predictions WHERE user_id=$1 AND tournament_id=$2',[req.userId,tournament_id])).rows[0]; if(existing) return res.status(400).json({error:'Vous avez déjà confirmé votre prédiction. Impossible de la modifier.'}); res.json((await pool.query('INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.post('/api/tournament-winner', auth, async (req, res) => { try { const {tournament_id,team_id}=req.body; const t=(await pool.query('SELECT lock_winner_prediction FROM tournaments WHERE id=$1',[tournament_id])).rows[0]; const isNewUser = await isNewUserGracePeriod(req.userId); if(t?.lock_winner_prediction && !isNewUser) return res.status(400).json({error:'Prédictions verrouillées par l\'admin'}); const finalMatch=(await pool.query("SELECT id,status FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tournament_id])).rows[0]; if(finalMatch && !isNewUser) return res.status(400).json({error:'La finale a commencé, prédictions fermées'}); const existing=(await pool.query('SELECT id FROM tournament_winner_predictions WHERE user_id=$1 AND tournament_id=$2',[req.userId,tournament_id])).rows[0]; if(existing) return res.status(400).json({error:'Vous avez déjà confirmé votre prédiction. Impossible de la modifier.'}); res.json((await pool.query('INSERT INTO tournament_winner_predictions(user_id,tournament_id,team_id) VALUES($1,$2,$3) RETURNING *',[req.userId,tournament_id,team_id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.get('/api/tournaments/:id/started', async (req, res) => { try { const tid=req.params.id; const t=(await pool.query('SELECT has_started,lock_match_predictions,lock_winner_prediction,lock_player_predictions,lock_finalist_prediction FROM tournaments WHERE id=$1',[tid])).rows[0]; const hasCompleted=(await pool.query('SELECT 1 FROM matches WHERE tournament_id=$1 AND status=$2 LIMIT 1',[tid,'completed'])).rows.length>0; const hasFinalStarted=(await pool.query("SELECT 1 FROM matches WHERE tournament_id=$1 AND bracket_round=2 AND status IN ('live','completed') LIMIT 1",[tid])).rows.length>0; res.json({started:t?.has_started||false,hasCompletedMatch:hasCompleted,hasFinalStarted,locks:{match:t?.lock_match_predictions||false,winner:t?.lock_winner_prediction||false,player:t?.lock_player_predictions||false,finalist:t?.lock_finalist_prediction||false}}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
@@ -588,7 +600,31 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
       if (!groups[g]) groups[g] = [];
       groups[g].push(s);
     });
-    Object.values(groups).forEach(arr => arr.sort((a, b) => b.points - a.points || b.gd - a.gd || b.gf - a.gf || a.name.localeCompare(b.name)));
+    Object.values(groups).forEach(arr => {
+      // Sort with proper tiebreakers: points → direct matchups → goal difference → goals for
+      const completedGroupMatches = allMatches.filter(m => m.status === 'completed');
+      arr.sort((a, b) => {
+        // 1. Points
+        if (b.points !== a.points) return b.points - a.points;
+        // 2. Direct matchups (head-to-head between tied teams)
+        const directMatch = completedGroupMatches.find(m =>
+          (m.team1_id === a.team_id && m.team2_id === b.team_id) ||
+          (m.team1_id === b.team_id && m.team2_id === a.team_id)
+        );
+        if (directMatch) {
+          const aIsTeam1 = directMatch.team1_id === a.team_id;
+          const aGoals = aIsTeam1 ? directMatch.team1_score : directMatch.team2_score;
+          const bGoals = aIsTeam1 ? directMatch.team2_score : directMatch.team1_score;
+          if (aGoals !== bGoals) return bGoals < aGoals ? -1 : 1; // winner of direct match ranks higher
+        }
+        // 3. Goal difference
+        if (b.gd !== a.gd) return b.gd - a.gd;
+        // 4. Strongest attack (most goals for)
+        if (b.gf !== a.gf) return b.gf - a.gf;
+        // 5. Name
+        return a.name.localeCompare(b.name);
+      });
+    });
 
     // Get per-group qualification counts (admin-configurable)
     let qualifications = {};
@@ -874,6 +910,56 @@ app.put('/api/admin/tournaments/:id/qualifications', auth, adminAuth, async (req
 
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
+// Admin dashboard stats - per tournament
+app.get('/api/admin/stats', auth, adminAuth, async (req, res) => {
+  try {
+    const tid = req.query.tournament_id;
+    let matchFilter = '', predJoin = '';
+    const params = [];
+    if (tid && tid !== 'all') {
+      matchFilter = ' AND m.tournament_id=$1';
+      params.push(tid);
+    }
+    const totalUsers = (await pool.query('SELECT COUNT(*) as c FROM users')).rows[0]?.c || 0;
+    const totalMatches = (await pool.query(`SELECT COUNT(*) as c FROM matches m WHERE 1=1${matchFilter}`, params)).rows[0]?.c || 0;
+    const completedMatches = (await pool.query(`SELECT COUNT(*) as c FROM matches m WHERE m.status='completed'${matchFilter}`, params)).rows[0]?.c || 0;
+    const totalPredictions = (await pool.query(`SELECT COUNT(*) as c FROM predictions p JOIN matches m ON p.match_id=m.id WHERE 1=1${matchFilter}`, params)).rows[0]?.c || 0;
+    const totalTeams = tid && tid !== 'all'
+      ? (await pool.query('SELECT COUNT(*) as c FROM tournament_teams WHERE tournament_id=$1', [tid])).rows[0]?.c || 0
+      : (await pool.query('SELECT COUNT(*) as c FROM teams')).rows[0]?.c || 0;
+    res.json({ users: parseInt(totalUsers), matches: parseInt(totalMatches), completed_matches: parseInt(completedMatches), predictions: parseInt(totalPredictions), teams: parseInt(totalTeams) });
+  } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Public statistics per tournament
+app.get('/api/stats/tournament/:id', async (req, res) => {
+  try {
+    const tid = req.params.id;
+    const totalMatches = parseInt((await pool.query("SELECT COUNT(*) as c FROM matches WHERE tournament_id=$1", [tid])).rows[0]?.c) || 0;
+    const completedMatches = parseInt((await pool.query("SELECT COUNT(*) as c FROM matches WHERE tournament_id=$1 AND status='completed'", [tid])).rows[0]?.c) || 0;
+    const totalPredictions = parseInt((await pool.query("SELECT COUNT(*) as c FROM predictions p JOIN matches m ON p.match_id=m.id WHERE m.tournament_id=$1", [tid])).rows[0]?.c) || 0;
+    const totalGoals = parseInt((await pool.query("SELECT COALESCE(SUM(team1_score+team2_score),0) as c FROM matches WHERE tournament_id=$1 AND status='completed'", [tid])).rows[0]?.c) || 0;
+    const totalTeams = parseInt((await pool.query("SELECT COUNT(*) as c FROM tournament_teams WHERE tournament_id=$1", [tid])).rows[0]?.c) || 0;
+    const totalPlayers = parseInt((await pool.query("SELECT COUNT(*) as c FROM tournament_players WHERE tournament_id=$1", [tid])).rows[0]?.c) || 0;
+    const totalSanctions = parseInt((await pool.query("SELECT COUNT(*) as c FROM sanctions WHERE tournament_id=$1 AND is_active=true", [tid])).rows[0]?.c) || 0;
+    const topScorers = (await pool.query("SELECT tp.name, tp.goals, t.name as team_name, t.flag_url FROM tournament_players tp LEFT JOIN teams t ON tp.team_id=t.id WHERE tp.tournament_id=$1 AND tp.goals>0 ORDER BY tp.goals DESC LIMIT 5", [tid])).rows;
+    // Best attack: team with most goals scored in the tournament
+    const teamGoals = (await pool.query(`
+      SELECT t.id, t.name, t.flag_url, 
+        COALESCE(SUM(CASE WHEN m.team1_id=t.id THEN m.team1_score WHEN m.team2_id=t.id THEN m.team2_score ELSE 0 END),0) as goals_for,
+        COALESCE(SUM(CASE WHEN m.team1_id=t.id THEN m.team2_score WHEN m.team2_id=t.id THEN m.team1_score ELSE 0 END),0) as goals_against
+      FROM tournament_teams tt JOIN teams t ON tt.team_id=t.id
+      LEFT JOIN matches m ON m.tournament_id=$1 AND m.status='completed' AND (m.team1_id=t.id OR m.team2_id=t.id)
+      WHERE tt.tournament_id=$1 GROUP BY t.id,t.name,t.flag_url
+      ORDER BY goals_for DESC
+    `, [tid])).rows;
+    const bestAttack = teamGoals.slice(0, 3);
+    const bestDefense = [...teamGoals].sort((a, b) => parseInt(a.goals_against) - parseInt(b.goals_against)).slice(0, 3);
+    const avgGoalsPerMatch = completedMatches > 0 ? (totalGoals / completedMatches).toFixed(1) : 0;
+    res.json({ totalMatches, completedMatches, totalPredictions, totalGoals, totalTeams, totalPlayers, totalSanctions, avgGoalsPerMatch, topScorers, bestAttack, bestDefense });
+  } catch(e) { console.error(e); res.json({}); }
+});
+
 // Save global scoring rules + auto-recalculate ALL tournaments
 app.put('/api/admin/scoring-rules', auth, adminAuth, strictAdmin, async (req, res) => {
   try {
@@ -989,6 +1075,80 @@ app.put('/api/admin/matches/:id/edit-score', auth, adminAuth, async (req, res) =
     cacheClear('lb');
     res.json({message:`Score modifié. ${updated} pronostics recalculés.`, updated});
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
+});
+
+// Per-match prediction lock toggle
+app.put('/api/admin/matches/:id/lock-predictions', auth, adminAuth, async (req, res) => {
+  try {
+    const { locked } = req.body;
+    const match = (await pool.query('UPDATE matches SET predictions_locked=$1 WHERE id=$2 RETURNING id,predictions_locked', [!!locked, req.params.id])).rows[0];
+    cacheClear('matches');
+    res.json({ message: locked ? 'Pronostics verrouillés' : 'Pronostics déverrouillés', match });
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// Get all user predictions for a match (visible after match started/completed)
+app.get('/api/matches/:id/predictions', async (req, res) => {
+  try {
+    const match = (await pool.query('SELECT * FROM matches WHERE id=$1', [req.params.id])).rows[0];
+    if (!match) return res.status(404).json({error:'Match non trouvé'});
+    
+    // Always compute prediction stats (percentages) - these are safe to show
+    const allPreds = (await pool.query('SELECT team1_score, team2_score FROM predictions WHERE match_id=$1', [req.params.id])).rows;
+    const totalPreds = allPreds.length;
+    let team1Wins = 0, team2Wins = 0, draws = 0;
+    allPreds.forEach(p => {
+      if (p.team1_score > p.team2_score) team1Wins++;
+      else if (p.team1_score < p.team2_score) team2Wins++;
+      else draws++;
+    });
+    const stats = {
+      total: totalPreds,
+      team1_win_pct: totalPreds ? Math.round((team1Wins / totalPreds) * 100) : 0,
+      team2_win_pct: totalPreds ? Math.round((team2Wins / totalPreds) * 100) : 0,
+      draw_pct: totalPreds ? Math.round((draws / totalPreds) * 100) : 0,
+    };
+    
+    // Only show individual predictions after match started
+    if (match.status === 'upcoming') return res.json({ predictions: [], stats });
+    
+    const result = await pool.query(`
+      SELECT p.team1_score, p.team2_score, p.points_earned, u.id as user_id, u.name as user_name, u.avatar_url,
+        CASE WHEN p.team1_score=m.team1_score AND p.team2_score=m.team2_score THEN 'exact'
+             WHEN (p.team1_score>p.team2_score AND m.team1_score>m.team2_score) OR (p.team1_score<p.team2_score AND m.team1_score<m.team2_score) OR (p.team1_score=p.team2_score AND m.team1_score=m.team2_score) THEN 'correct'
+             ELSE 'wrong' END as prediction_type
+      FROM predictions p
+      JOIN users u ON p.user_id = u.id
+      JOIN matches m ON p.match_id = m.id
+      WHERE p.match_id = $1
+      ORDER BY p.points_earned DESC, u.name
+    `, [req.params.id]);
+    res.json({ predictions: result.rows, stats });
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
+
+// User reminders: what predictions are missing for active tournaments
+app.get('/api/reminders', auth, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const activeTournaments = (await pool.query('SELECT id, name, enable_player_predictions FROM tournaments WHERE is_active=true')).rows;
+    const reminders = [];
+    for (const t of activeTournaments) {
+      // Check tournament winner prediction
+      const winnerPred = (await pool.query('SELECT id FROM tournament_winner_predictions WHERE user_id=$1 AND tournament_id=$2', [userId, t.id])).rows[0];
+      if (!winnerPred) reminders.push({ type: 'winner', tournament_id: t.id, tournament_name: t.name, message: `Choisissez le vainqueur du ${t.name}` });
+      // Check finalist prediction
+      const finalistPred = (await pool.query('SELECT id FROM finalist_predictions WHERE user_id=$1 AND tournament_id=$2', [userId, t.id])).rows[0];
+      if (!finalistPred) reminders.push({ type: 'finalist', tournament_id: t.id, tournament_name: t.name, message: `Prédisez le finaliste du ${t.name}` });
+      // Check player predictions
+      if (t.enable_player_predictions) {
+        const playerPred = (await pool.query('SELECT id, best_player_id, best_goal_scorer_id FROM player_predictions WHERE user_id=$1 AND tournament_id=$2', [userId, t.id])).rows[0];
+        if (!playerPred?.best_player_id) reminders.push({ type: 'best_player', tournament_id: t.id, tournament_name: t.name, message: `Choisissez le meilleur joueur du ${t.name}` });
+        if (!playerPred?.best_goal_scorer_id) reminders.push({ type: 'best_scorer', tournament_id: t.id, tournament_name: t.name, message: `Choisissez le meilleur buteur du ${t.name}` });
+      }
+    }
+    res.json(reminders);
+  } catch(e) { res.json([]); }
 });
 
 app.get('/api/settings', async (req, res) => { try { const c=cacheGet('settings'); if(c) return res.json(c); const s={}; (await pool.query('SELECT * FROM site_settings')).rows.forEach(r=>s[r.setting_key]=r.setting_value); cacheSet('settings',s,300000); res.json(s); } catch(e) { res.status(500).json({error:'Erreur'}); }});
