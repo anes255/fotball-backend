@@ -118,6 +118,11 @@ const initDB = async () => {
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS predictions_locked BOOLEAN DEFAULT FALSE',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS match_note TEXT',
     'ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_permissions JSONB DEFAULT \'{}\'',
+    'ALTER TABLE tournament_players ADD COLUMN IF NOT EXISTS yellow_cards INTEGER DEFAULT 0',
+    'ALTER TABLE tournament_players ADD COLUMN IF NOT EXISTS red_cards INTEGER DEFAULT 0',
+    'CREATE TABLE IF NOT EXISTS group_rank_overrides (id SERIAL PRIMARY KEY, tournament_id INTEGER REFERENCES tournaments(id) ON DELETE CASCADE, group_name TEXT, team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE, override_rank INTEGER, UNIQUE(tournament_id, group_name, team_id))',
+    'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_defender_id INTEGER',
+    'ALTER TABLE tournaments ADD COLUMN IF NOT EXISTS best_attacker_id INTEGER',
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
@@ -602,13 +607,24 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
       if (!groups[g]) groups[g] = [];
       groups[g].push(s);
     });
-    Object.values(groups).forEach(arr => {
-      // Sort with proper tiebreakers: points → direct matchups → goal difference → goals for
+    // Get group rank overrides (admin-set for equal-points tiebreakers)
+    let rankOverrides = {};
+    try {
+      const overrideRows = (await pool.query('SELECT group_name, team_id, override_rank FROM group_rank_overrides WHERE tournament_id=$1', [tid])).rows;
+      overrideRows.forEach(r => {
+        if (!rankOverrides[r.group_name]) rankOverrides[r.group_name] = {};
+        rankOverrides[r.group_name][r.team_id] = r.override_rank;
+      });
+    } catch(e) {}
+
+    Object.entries(groups).forEach(([groupName, arr]) => {
       const completedGroupMatches = allMatches.filter(m => m.status === 'completed');
       arr.sort((a, b) => {
         // 1. Points
         if (b.points !== a.points) return b.points - a.points;
-        // 2. Direct matchups (head-to-head between tied teams)
+        // 2. Goal difference
+        if (b.gd !== a.gd) return b.gd - a.gd;
+        // 3. Direct matchup (head-to-head)
         const directMatch = completedGroupMatches.find(m =>
           (m.team1_id === a.team_id && m.team2_id === b.team_id) ||
           (m.team1_id === b.team_id && m.team2_id === a.team_id)
@@ -617,13 +633,20 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
           const aIsTeam1 = directMatch.team1_id === a.team_id;
           const aGoals = aIsTeam1 ? directMatch.team1_score : directMatch.team2_score;
           const bGoals = aIsTeam1 ? directMatch.team2_score : directMatch.team1_score;
-          if (aGoals !== bGoals) return bGoals < aGoals ? -1 : 1; // winner of direct match ranks higher
+          if (aGoals !== bGoals) return bGoals < aGoals ? -1 : 1;
         }
-        // 3. Goal difference
-        if (b.gd !== a.gd) return b.gd - a.gd;
-        // 4. Strongest attack (most goals for)
+        // 4. Best attack (most goals for)
         if (b.gf !== a.gf) return b.gf - a.gf;
-        // 5. Name
+        // 5. Best defense (fewest goals against)
+        if (a.ga !== b.ga) return a.ga - b.ga;
+        // 6. Admin override rank (for manual tiebreaker decision)
+        const overridesForGroup = rankOverrides[groupName] || {};
+        const aOverride = overridesForGroup[a.team_id];
+        const bOverride = overridesForGroup[b.team_id];
+        if (aOverride !== undefined && bOverride !== undefined) return aOverride - bOverride;
+        if (aOverride !== undefined) return -1;
+        if (bOverride !== undefined) return 1;
+        // 7. Name
         return a.name.localeCompare(b.name);
       });
     });
@@ -657,8 +680,107 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     const sortedKnockout = {};
     knockoutStages.forEach(s => { if (knockout[s]) sortedKnockout[s] = knockout[s]; });
 
-    res.json({ groups, knockout: sortedKnockout, qualifications });
+    // Get best defender / attacker awards for this tournament
+    let tournamentAwards = {};
+    try {
+      const tourRow = (await pool.query(
+        `SELECT t.best_defender_id, t.best_attacker_id,
+          bd.name as best_defender_name, bd.photo_url as best_defender_photo, bd.id as best_defender_player_id,
+          tbd.name as best_defender_team, tbd.flag_url as best_defender_team_flag,
+          ba.name as best_attacker_name, ba.photo_url as best_attacker_photo, ba.id as best_attacker_player_id,
+          tba.name as best_attacker_team, tba.flag_url as best_attacker_team_flag
+         FROM tournaments t
+         LEFT JOIN tournament_players bd ON t.best_defender_id = bd.id
+         LEFT JOIN teams tbd ON bd.team_id = tbd.id
+         LEFT JOIN tournament_players ba ON t.best_attacker_id = ba.id
+         LEFT JOIN teams tba ON ba.team_id = tba.id
+         WHERE t.id=$1`, [tid]
+      )).rows[0];
+      if (tourRow) tournamentAwards = tourRow;
+    } catch(e) {}
+
+    res.json({ groups, knockout: sortedKnockout, qualifications, rankOverrides, tournamentAwards });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Public sanctions endpoint (no editor name)
+app.get('/api/sanctions', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT s.id, s.type, s.reason, s.minute, s.match_ban_count, s.is_active, s.created_at,
+        tp.name as player_name, tp.photo_url as player_photo, tp.goals as player_goals,
+        tp.yellow_cards as player_yellow_cards, tp.red_cards as player_red_cards,
+        t.name as team_name, t.flag_url as team_flag, t.id as team_id,
+        tour.name as tournament_name, tour.id as tournament_id,
+        m.team1_score, m.team2_score,
+        mt1.name as match_team1_name, mt2.name as match_team2_name, m.match_date
+      FROM sanctions s
+      JOIN tournament_players tp ON s.player_id = tp.id
+      JOIN teams t ON tp.team_id = t.id
+      LEFT JOIN tournaments tour ON s.tournament_id = tour.id
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
+      ORDER BY s.created_at DESC
+    `);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Public user stats page
+app.get('/api/users/:id/stats', async (req, res) => {
+  try {
+    const uid = req.params.id;
+    const user = (await pool.query('SELECT id, name, avatar_url, created_at FROM users WHERE id=$1', [uid])).rows[0];
+    if (!user) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    const predictions = (await pool.query(`
+      SELECT p.*, m.match_date, m.team1_score as actual_t1, m.team2_score as actual_t2, m.status,
+        m.tournament_id, t1.name as team1_name, t1.flag_url as team1_flag,
+        t2.name as team2_name, t2.flag_url as team2_flag, tour.name as tournament_name
+      FROM predictions p
+      JOIN matches m ON p.match_id = m.id
+      JOIN teams t1 ON m.team1_id = t1.id
+      JOIN teams t2 ON m.team2_id = t2.id
+      LEFT JOIN tournaments tour ON m.tournament_id = tour.id
+      WHERE p.user_id = $1
+      ORDER BY m.match_date DESC`, [uid])).rows;
+    const lbRow = (await pool.query(`
+      SELECT COALESCE(SUM(p.points_earned),0) as total_points,
+        COUNT(*) as total_predictions,
+        COUNT(*) FILTER (WHERE m.status='completed') as completed,
+        COUNT(*) FILTER (WHERE m.status='completed' AND p.points_earned>0) as correct,
+        COUNT(*) FILTER (WHERE m.status='completed' AND p.team1_score=m.team1_score AND p.team2_score=m.team2_score) as exact_predictions
+      FROM predictions p JOIN matches m ON p.match_id=m.id WHERE p.user_id=$1`, [uid])).rows[0];
+    const lb = (await pool.query(`SELECT u.id, COALESCE(SUM(p.points_earned),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0) as pts FROM users u LEFT JOIN predictions p ON p.user_id=u.id LEFT JOIN matches m ON p.match_id=m.id AND m.status='completed' GROUP BY u.id ORDER BY pts DESC`)).rows;
+    const position = lb.findIndex(u => parseInt(u.id) === parseInt(uid)) + 1;
+    const totalUsers = lb.length;
+    res.json({ user, stats: lbRow, predictions, position, totalUsers });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Admin: set group rank override
+app.put('/api/admin/tournaments/:id/group-rank-override', auth, adminAuth, async (req, res) => {
+  try {
+    const { group_name, team_id, override_rank } = req.body;
+    const tid = req.params.id;
+    if (override_rank === null || override_rank === undefined) {
+      await pool.query('DELETE FROM group_rank_overrides WHERE tournament_id=$1 AND group_name=$2 AND team_id=$3', [tid, group_name, team_id]);
+    } else {
+      await pool.query(`INSERT INTO group_rank_overrides(tournament_id,group_name,team_id,override_rank) VALUES($1,$2,$3,$4)
+        ON CONFLICT(tournament_id,group_name,team_id) DO UPDATE SET override_rank=$4`, [tid, group_name, team_id, override_rank]);
+    }
+    res.json({ message: 'Override mis à jour' });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Admin: set best defender / best attacker for a tournament
+app.put('/api/admin/tournaments/:id/best-players', auth, adminAuth, async (req, res) => {
+  try {
+    const { best_defender_id, best_attacker_id } = req.body;
+    await pool.query('UPDATE tournaments SET best_defender_id=COALESCE($1,best_defender_id), best_attacker_id=COALESCE($2,best_attacker_id) WHERE id=$3',
+      [best_defender_id || null, best_attacker_id || null, req.params.id]);
+    res.json({ message: 'Mis à jour' });
+  } catch(e) { res.status(500).json({ error: 'Erreur' }); }
 });
 
 // Leaderboard - computed from predictions
@@ -929,7 +1051,8 @@ app.get('/api/admin/stats', auth, adminAuth, async (req, res) => {
     const totalTeams = tid && tid !== 'all'
       ? (await pool.query('SELECT COUNT(*) as c FROM tournament_teams WHERE tournament_id=$1', [tid])).rows[0]?.c || 0
       : (await pool.query('SELECT COUNT(*) as c FROM teams')).rows[0]?.c || 0;
-    res.json({ users: parseInt(totalUsers), matches: parseInt(totalMatches), completed_matches: parseInt(completedMatches), predictions: parseInt(totalPredictions), teams: parseInt(totalTeams) });
+    const liveMatches = (await pool.query(`SELECT COUNT(*) as c FROM matches m WHERE m.status='live'${matchFilter}`, params)).rows[0]?.c || 0;
+    res.json({ users: parseInt(totalUsers), matches: parseInt(totalMatches), completed_matches: parseInt(completedMatches), live_matches: parseInt(liveMatches), predictions: parseInt(totalPredictions), teams: parseInt(totalTeams) });
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
