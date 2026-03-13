@@ -382,7 +382,7 @@ app.get('/api/admin/matches/tournament/:id', auth, adminAuth, async (req, res) =
 app.post('/api/matches', auth, adminAuth, async (req, res) => { try { const {tournament_id,team1_id,team2_id,match_date,stage,bracket_round,bracket_position,next_match_id,next_match_slot}=req.body; res.json((await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position,next_match_id,next_match_slot) VALUES($1,$2,$3,$4,$5,$6,0,0,$7,$8,$9,$10) RETURNING *',[tournament_id,team1_id||null,team2_id||null,match_date,stage,'upcoming',bracket_round||null,bracket_position||null,next_match_id||null,next_match_slot||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/matches/:id', auth, adminAuth, async (req, res) => { try { const {tournament_id,team1_id,team2_id,match_date,stage}=req.body; res.json((await pool.query('UPDATE matches SET tournament_id=$1,team1_id=$2,team2_id=$3,match_date=$4,stage=$5 WHERE id=$6 RETURNING *',[tournament_id,team1_id,team2_id,match_date,stage,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/matches/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM predictions WHERE match_id=$1',[req.params.id]); await pool.query('DELETE FROM matches WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/matches/:id/start', auth, adminAuth, async (req, res) => { try { res.json((await pool.query("UPDATE matches SET status='live',team1_score=COALESCE(team1_score,0),team2_score=COALESCE(team2_score,0) WHERE id=$1 RETURNING *",[req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/matches/:id/start', auth, adminAuth, async (req, res) => { try { res.json((await pool.query("UPDATE matches SET status='live',predictions_locked=TRUE,team1_score=COALESCE(team1_score,0),team2_score=COALESCE(team2_score,0) WHERE id=$1 RETURNING *",[req.params.id])).rows[0]); cacheClear('matches_vis'); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/matches/:id/score', auth, adminAuth, async (req, res) => { try { const {team1_score,team2_score}=req.body; res.json((await pool.query("UPDATE matches SET team1_score=$1,team2_score=$2 WHERE id=$3 RETURNING *",[team1_score,team2_score,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
@@ -754,7 +754,64 @@ app.get('/api/users/:id/stats', async (req, res) => {
     const lb = (await pool.query(`SELECT u.id, COALESCE(SUM(p.points_earned),0)+COALESCE((SELECT SUM(twp.points_earned) FROM tournament_winner_predictions twp WHERE twp.user_id=u.id),0) as pts FROM users u LEFT JOIN predictions p ON p.user_id=u.id LEFT JOIN matches m ON p.match_id=m.id AND m.status='completed' GROUP BY u.id ORDER BY pts DESC`)).rows;
     const position = lb.findIndex(u => parseInt(u.id) === parseInt(uid)) + 1;
     const totalUsers = lb.length;
-    res.json({ user, stats: lbRow, predictions, position, totalUsers });
+    // Fetch tournaments the user has participated in (with stats)
+    let tournamentStats = [];
+    try {
+      tournamentStats = (await pool.query(`
+        SELECT tour.id, tour.name, tour.best_defender_id, tour.best_attacker_id,
+          COUNT(DISTINCT p.id) as predictions_count,
+          COUNT(DISTINCT p.id) FILTER (WHERE m.status='completed') as completed,
+          COUNT(DISTINCT p.id) FILTER (WHERE m.status='completed' AND p.points_earned>0) as correct,
+          COUNT(DISTINCT p.id) FILTER (WHERE m.status='completed' AND p.team1_score=m.team1_score AND p.team2_score=m.team2_score) as exact_predictions,
+          COALESCE(SUM(p.points_earned) FILTER (WHERE m.status='completed'),0) as points,
+          bd.name as best_defender_name, bd.photo_url as best_defender_photo, bd.id as best_defender_player_id,
+          tbd.name as best_defender_team, tbd.flag_url as best_defender_team_flag,
+          ba.name as best_attacker_name, ba.photo_url as best_attacker_photo, ba.id as best_attacker_player_id,
+          tba.name as best_attacker_team, tba.flag_url as best_attacker_team_flag
+        FROM tournaments tour
+        JOIN matches m ON m.tournament_id = tour.id
+        JOIN predictions p ON p.match_id = m.id AND p.user_id = $1
+        LEFT JOIN tournament_players bd ON tour.best_defender_id = bd.id
+        LEFT JOIN teams tbd ON bd.team_id = tbd.id
+        LEFT JOIN tournament_players ba ON tour.best_attacker_id = ba.id
+        LEFT JOIN teams tba ON ba.team_id = tba.id
+        GROUP BY tour.id, tour.name, tour.best_defender_id, tour.best_attacker_id,
+          bd.name, bd.photo_url, bd.id, tbd.name, tbd.flag_url,
+          ba.name, ba.photo_url, ba.id, tba.name, tba.flag_url
+        ORDER BY points DESC
+      `, [uid])).rows;
+    } catch(e) {}
+    // Fetch top goalscorers across all tournaments
+    let topGoalscorers = [];
+    try {
+      topGoalscorers = (await pool.query(`
+        SELECT tp.id, tp.name, tp.photo_url, tp.goals, tp.yellow_cards, tp.red_cards,
+          t.name as team_name, t.flag_url as team_flag,
+          tour.name as tournament_name, tour.id as tournament_id
+        FROM tournament_players tp
+        JOIN teams t ON tp.team_id = t.id
+        JOIN tournaments tour ON tp.tournament_id = tour.id
+        WHERE tp.goals > 0
+        ORDER BY tp.goals DESC LIMIT 10
+      `)).rows;
+    } catch(e) {}
+    // Fetch active sanctions (public)
+    let activeSanctions = [];
+    try {
+      activeSanctions = (await pool.query(`
+        SELECT s.id, s.type, s.reason, s.minute, s.match_ban_count, s.created_at,
+          tp.name as player_name, tp.photo_url as player_photo, tp.id as player_id,
+          t.name as team_name, t.flag_url as team_flag,
+          tour.name as tournament_name
+        FROM sanctions s
+        JOIN tournament_players tp ON s.player_id = tp.id
+        JOIN teams t ON tp.team_id = t.id
+        LEFT JOIN tournaments tour ON s.tournament_id = tour.id
+        WHERE s.is_active = true
+        ORDER BY s.created_at DESC LIMIT 20
+      `)).rows;
+    } catch(e) {}
+    res.json({ user, stats: lbRow, predictions, position, totalUsers, tournamentStats, topGoalscorers, activeSanctions });
   } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
 });
 
@@ -1366,6 +1423,19 @@ const PORT = process.env.PORT || 3000;
     const hash = await bcrypt.hash('password', 10);
     await pool.query('INSERT INTO users(name,phone,password,is_admin) VALUES($1,$2,$3,$4) ON CONFLICT(phone) DO UPDATE SET password=$3', ['Admin', '0665448641', hash, true]);
     startServer();
+
+    // Auto-lock predictions when match start time arrives (every 30 seconds)
+    setInterval(async () => {
+      try {
+        await pool.query(`
+          UPDATE matches SET predictions_locked = TRUE
+          WHERE status = 'upcoming'
+            AND predictions_locked = FALSE
+            AND match_date <= NOW()
+        `);
+      } catch(e) { /* ignore */ }
+    }, 30000);
+
   } catch (e) {
     console.error('DB init error:', e.message);
     console.log('⚠️ Starting server anyway - DB may be temporarily unavailable');
