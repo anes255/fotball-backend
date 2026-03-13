@@ -904,6 +904,7 @@ app.get('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT s.*, tp.name as player_name, tp.photo_url as player_photo,
+        tp.goals as player_goals, tp.yellow_cards as player_yellow_cards, tp.red_cards as player_red_cards,
         t.name as team_name, t.flag_url as team_flag,
         tour.name as tournament_name, tour.id as tournament_id,
         m.match_date, m.stage as match_stage,
