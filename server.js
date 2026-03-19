@@ -934,6 +934,27 @@ app.get('/api/admin/stats', auth, adminAuth, async (req, res) => {
 });
 
 // Public statistics per tournament
+// Public sanctions list for a tournament (for stats page detail view)
+app.get('/api/sanctions/tournament/:id', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT s.id, s.type, s.reason, s.minute, s.match_ban_count, s.is_active, s.created_at,
+        tp.name as player_name, tp.photo_url as player_photo,
+        t.name as team_name, t.flag_url as team_flag,
+        m.id as match_id, t1.name as match_team1, t2.name as match_team2
+      FROM sanctions s
+      JOIN tournament_players tp ON s.player_id = tp.id
+      LEFT JOIN teams t ON tp.team_id = t.id
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams t1 ON m.team1_id = t1.id
+      LEFT JOIN teams t2 ON m.team2_id = t2.id
+      WHERE s.tournament_id = $1 AND s.is_active = true
+      ORDER BY s.created_at DESC
+    `, [req.params.id]);
+    res.json(result.rows);
+  } catch(e) { res.json([]); }
+});
+
 app.get('/api/stats/tournament/:id', async (req, res) => {
   try {
     const tid = req.params.id;
