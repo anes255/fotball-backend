@@ -118,6 +118,8 @@ const initDB = async () => {
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS predictions_locked BOOLEAN DEFAULT FALSE',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS team1_shots INTEGER DEFAULT 0',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS team2_shots INTEGER DEFAULT 0',
+    'ALTER TABLE tournament_teams ADD COLUMN IF NOT EXISTS rank_override INTEGER',
+    'ALTER TABLE matches ADD COLUMN IF NOT EXISTS admin_note TEXT',
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
@@ -554,7 +556,7 @@ app.put('/api/admin/tournaments/:id/locks', auth, adminAuth, async (req, res) =>
 app.get('/api/tournaments/:id/standings', async (req, res) => {
   try {
     const tid = req.params.id;
-    const teams = (await pool.query(`SELECT tt.team_id, tt.group_name, t.name, t.flag_url
+    const teams = (await pool.query(`SELECT tt.team_id, tt.group_name, tt.rank_override, t.name, t.flag_url
       FROM tournament_teams tt JOIN teams t ON tt.team_id=t.id WHERE tt.tournament_id=$1 ORDER BY tt.group_name,t.name`, [tid])).rows;
     const allMatches = (await pool.query(`SELECT m.*,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag FROM matches m LEFT JOIN teams t1 ON m.team1_id=t1.id LEFT JOIN teams t2 ON m.team2_id=t2.id WHERE m.tournament_id=$1 ORDER BY m.match_date`, [tid])).rows;
 
@@ -562,6 +564,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
     const stats = {};
     teams.forEach(t => {
       stats[t.team_id] = { team_id: t.team_id, name: t.name, flag_url: t.flag_url, group_name: t.group_name,
+        rank_override: t.rank_override,
         played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0, gd: 0, points: 0, deduction: 0 };
     });
 
@@ -603,8 +606,22 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
       groups[g].push(s);
     });
     Object.values(groups).forEach(arr => {
-      // Sort with proper tiebreakers: points → direct matchups → goal difference → goals for
       const completedGroupMatches = allMatches.filter(m => m.status === 'completed');
+      // If any team in this group has a rank_override, use admin ordering
+      const hasOverrides = arr.some(t => t.rank_override !== null && t.rank_override !== undefined);
+      if (hasOverrides) {
+        arr.sort((a, b) => {
+          const ra = a.rank_override ?? 9999;
+          const rb = b.rank_override ?? 9999;
+          if (ra !== rb) return ra - rb;
+          // Fallback to standard for teams without override
+          if (b.points !== a.points) return b.points - a.points;
+          if (b.gd !== a.gd) return b.gd - a.gd;
+          if (b.gf !== a.gf) return b.gf - a.gf;
+          return a.name.localeCompare(b.name);
+        });
+      } else {
+      // Sort with proper tiebreakers: points → direct matchups → goal difference → goals for
       arr.sort((a, b) => {
         // 1. Points
         if (b.points !== a.points) return b.points - a.points;
@@ -626,6 +643,7 @@ app.get('/api/tournaments/:id/standings', async (req, res) => {
         // 5. Name
         return a.name.localeCompare(b.name);
       });
+      }
     });
 
     // Get per-group qualification counts (admin-configurable)
@@ -909,6 +927,34 @@ app.put('/api/admin/tournaments/:id/qualifications', auth, adminAuth, async (req
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
 
+
+// Admin: Save manual ranking override for teams in a tournament group
+// Body: { overrides: [ { team_id, rank_override } ] }
+app.put('/api/admin/tournaments/:id/ranking-override', auth, adminAuth, async (req, res) => {
+  try {
+    const tid = req.params.id;
+    const { overrides } = req.body; // array of { team_id, rank_override }
+    if (!Array.isArray(overrides)) return res.status(400).json({ error: 'overrides must be an array' });
+    for (const { team_id, rank_override } of overrides) {
+      await pool.query(
+        'UPDATE tournament_teams SET rank_override = $1 WHERE tournament_id = $2 AND team_id = $3',
+        [rank_override === null ? null : parseInt(rank_override), tid, team_id]
+      );
+    }
+    cacheClear();
+    res.json({ message: 'OK' });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
+
+// Admin: Set or clear the admin note on a match (sanction warning for upcoming match)
+// Body: { note: "string or empty to clear" }
+app.put('/api/admin/matches/:id/note', auth, adminAuth, async (req, res) => {
+  try {
+    const { note } = req.body;
+    await pool.query('UPDATE matches SET admin_note = $1 WHERE id = $2', [note || null, req.params.id]);
+    res.json({ message: 'OK' });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
 
 app.get('/api/admin/scoring-rules', auth, adminAuth, async (req, res) => { try { res.json((await pool.query('SELECT * FROM scoring_rules')).rows); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
