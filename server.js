@@ -535,8 +535,8 @@ app.post('/api/predictions', auth, async (req, res) => { try { const {match_id,t
 
 app.get('/api/users/:id/predictions', async (req, res) => {
   try {
-    const user=(await pool.query('SELECT id,name,total_points FROM users WHERE id=$1',[req.params.id])).rows[0];
-    const predictions=(await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 AND m.status='completed' ORDER BY tour.name,m.match_date DESC`,[req.params.id])).rows;
+    const user=(await pool.query('SELECT id,name,total_points,avatar_url FROM users WHERE id=$1',[req.params.id])).rows[0];
+    const predictions=(await pool.query(`SELECT p.*,m.match_date,m.team1_score as actual_team1_score,m.team2_score as actual_team2_score,m.status,m.tournament_id,t1.name as team1_name,t1.flag_url as team1_flag,t2.name as team2_name,t2.flag_url as team2_flag,tour.name as tournament_name FROM predictions p JOIN matches m ON p.match_id=m.id JOIN teams t1 ON m.team1_id=t1.id JOIN teams t2 ON m.team2_id=t2.id LEFT JOIN tournaments tour ON m.tournament_id=tour.id WHERE p.user_id=$1 ORDER BY tour.name,m.match_date DESC`,[req.params.id])).rows;
     const winnerPred=(await pool.query('SELECT twp.*,t.name as team_name,t.flag_url,tour.name as tournament_name,twp.tournament_id FROM tournament_winner_predictions twp JOIN teams t ON twp.team_id=t.id JOIN tournaments tour ON twp.tournament_id=tour.id WHERE twp.user_id=$1',[req.params.id])).rows;
     const playerPred=(await pool.query(`SELECT pp.*,tour.name as tournament_name,pp.tournament_id,bp.name as best_player_name,bpt.name as best_player_team,gs.name as best_goal_scorer_name,gst.name as best_goal_scorer_team FROM player_predictions pp JOIN tournaments tour ON pp.tournament_id=tour.id LEFT JOIN tournament_players bp ON pp.best_player_id=bp.id LEFT JOIN teams bpt ON bp.team_id=bpt.id LEFT JOIN tournament_players gs ON pp.best_goal_scorer_id=gs.id LEFT JOIN teams gst ON gs.team_id=gst.id WHERE pp.user_id=$1`,[req.params.id])).rows;
     res.json({user,predictions,winnerPredictions:winnerPred,playerPredictions:playerPred});
@@ -1222,9 +1222,7 @@ app.get('/api/matches/:id/predictions', async (req, res) => {
       draw_pct: totalPreds ? Math.round((draws / totalPreds) * 100) : 0,
     };
     
-    // Only show individual predictions after match started
-    if (match.status === 'upcoming') return res.json({ predictions: [], stats });
-    
+    // Show individual predictions for all match states
     const result = await pool.query(`
       SELECT p.team1_score, p.team2_score, p.points_earned, u.id as user_id, u.name as user_name, u.avatar_url,
         CASE WHEN p.team1_score=m.team1_score AND p.team2_score=m.team2_score THEN 'exact'
