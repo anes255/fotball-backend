@@ -26,7 +26,8 @@ const Match = {
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       LEFT JOIN tournaments tour ON m.tournament_id = tour.id
-      WHERE m.status IN ('completed', 'live', 'upcoming')
+      WHERE m.status IN ('completed', 'live')
+        OR (m.status = 'upcoming' AND m.match_date <= NOW() + INTERVAL '24 hours')
       ORDER BY m.match_date ASC
     `);
     return result.rows;
@@ -70,7 +71,10 @@ const Match = {
       JOIN teams t1 ON m.team1_id = t1.id
       JOIN teams t2 ON m.team2_id = t2.id
       WHERE m.tournament_id = $1
-        AND m.status IN ('completed', 'live', 'upcoming')
+        AND (
+          m.status IN ('completed', 'live')
+          OR (m.status = 'upcoming' AND m.match_date <= NOW() + INTERVAL '24 hours')
+        )
       ORDER BY m.match_date ASC
     `, [tournamentId]);
     return result.rows;
