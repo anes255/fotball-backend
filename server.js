@@ -331,6 +331,50 @@ app.get('/api/players/:id/detail', async (req, res) => {
 });
 
 // Add goal event
+// Match events: goals + cards for a specific match (public)
+app.get('/api/matches/:id/events', async (req, res) => {
+  try {
+    const mid = req.params.id;
+    const goals = (await pool.query(`
+      SELECT ge.id, ge.minute, 'goal' as type,
+        tp.name as player_name, tp.photo_url as player_photo,
+        t.id as team_id, t.name as team_name, t.flag_url as team_flag,
+        m.team1_id, m.team2_id
+      FROM goal_events ge
+      JOIN tournament_players tp ON ge.player_id = tp.id
+      LEFT JOIN teams t ON tp.team_id = t.id
+      JOIN matches m ON ge.match_id = m.id
+      WHERE ge.match_id = $1
+      ORDER BY ge.minute ASC NULLS LAST, ge.id ASC
+    `, [mid])).rows;
+
+    const cards = (await pool.query(`
+      SELECT s.id, s.minute, s.type,
+        tp.name as player_name, tp.photo_url as player_photo,
+        t.id as team_id, t.name as team_name, t.flag_url as team_flag,
+        m.team1_id, m.team2_id
+      FROM sanctions s
+      JOIN tournament_players tp ON s.player_id = tp.id
+      LEFT JOIN teams t ON tp.team_id = t.id
+      JOIN matches m ON s.match_id = m.id
+      WHERE s.match_id = $1
+        AND s.type IN ('yellow_card','red_card','second_yellow')
+        AND s.is_active = true
+      ORDER BY s.minute ASC NULLS LAST, s.id ASC
+    `, [mid])).rows;
+
+    // Merge and sort all events by minute
+    const events = [...goals, ...cards].sort((a, b) => {
+      if (a.minute === null && b.minute === null) return 0;
+      if (a.minute === null) return 1;
+      if (b.minute === null) return -1;
+      return a.minute - b.minute;
+    });
+
+    res.json({ events, goals, cards });
+  } catch(e) { console.error(e); res.status(500).json({ error: 'Erreur' }); }
+});
+
 app.post('/api/players/:id/goal-events', auth, adminAuth, async (req, res) => {
   try {
     const { match_id, minute } = req.body;
