@@ -835,6 +835,51 @@ app.get('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
 });
 
 // Get sanctions for a specific player
+// Public: goals scored by players of a team (across all matches)
+app.get('/api/teams/:id/goals', async (req, res) => {
+  try {
+    const rows = (await pool.query(`
+      SELECT ge.id, ge.minute, tp.name as player_name, tp.id as player_id,
+        m.id as match_id, m.match_date, m.stage, m.team1_score, m.team2_score,
+        t1.name as team1_name, t2.name as team2_name,
+        tour.name as tournament_name
+      FROM goal_events ge
+      JOIN tournament_players tp ON ge.player_id = tp.id
+      JOIN matches m ON ge.match_id = m.id
+      LEFT JOIN teams t1 ON m.team1_id = t1.id
+      LEFT JOIN teams t2 ON m.team2_id = t2.id
+      LEFT JOIN tournaments tour ON ge.tournament_id = tour.id
+      WHERE tp.team_id = $1
+      ORDER BY m.match_date DESC, ge.minute ASC
+    `, [req.params.id])).rows;
+    res.json(rows);
+  } catch(e) { res.json([]); }
+});
+
+// Public: active player sanctions for a team
+app.get('/api/teams/:id/sanctions', async (req, res) => {
+  try {
+    const rows = (await pool.query(`
+      SELECT s.id, s.type, s.minute, s.match_ban_count, s.bans_remaining,
+        s.reason, s.is_active, s.created_at,
+        tp.name as player_name, tp.id as player_id, tp.photo_url as player_photo,
+        m.id as match_id, m.match_date,
+        mt1.name as match_team1_name, mt2.name as match_team2_name,
+        tour.name as tournament_name
+      FROM sanctions s
+      JOIN tournament_players tp ON s.player_id = tp.id
+      LEFT JOIN matches m ON s.match_id = m.id
+      LEFT JOIN teams mt1 ON m.team1_id = mt1.id
+      LEFT JOIN teams mt2 ON m.team2_id = mt2.id
+      LEFT JOIN tournaments tour ON s.tournament_id = tour.id
+      WHERE tp.team_id = $1
+        AND s.type IN ('yellow_card','red_card','second_yellow','suspension')
+      ORDER BY s.is_active DESC, s.created_at DESC
+    `, [req.params.id])).rows;
+    res.json(rows);
+  } catch(e) { res.json([]); }
+});
+
 app.get('/api/players/:id/sanctions', async (req, res) => {
   try {
     const result = await pool.query(`
