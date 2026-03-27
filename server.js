@@ -120,6 +120,7 @@ const initDB = async () => {
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS team2_shots INTEGER DEFAULT 0',
     'ALTER TABLE tournament_teams ADD COLUMN IF NOT EXISTS rank_override INTEGER',
     'ALTER TABLE matches ADD COLUMN IF NOT EXISTS admin_note TEXT',
+    'ALTER TABLE sanctions ADD COLUMN IF NOT EXISTS bans_remaining INTEGER',
   ];
   for (const sql of alts) { try { await pool.query(sql); } catch(e) {} }
 
@@ -159,6 +160,28 @@ const getTournamentRules = async (tournamentId) => {
     if (tRules.length > 0) tRules.forEach(r => rules[r.rule_type] = r.points);
   }
   return rules;
+};
+
+// Decrement bans_remaining for all active suspended players of a team after their team plays a match
+const decrementSuspensions = async (teamId, tournamentId) => {
+  try {
+    // Get all active sanctions with bans_remaining > 0 for players in this team
+    const sanctions = (await pool.query(`
+      SELECT s.id, s.bans_remaining FROM sanctions s
+      JOIN tournament_players tp ON s.player_id = tp.id
+      WHERE tp.team_id = $1 AND s.tournament_id = $2
+        AND s.is_active = true AND s.bans_remaining > 0
+    `, [teamId, tournamentId])).rows;
+    for (const s of sanctions) {
+      const newRemaining = s.bans_remaining - 1;
+      if (newRemaining <= 0) {
+        // Suspension served — mark as no longer active
+        await pool.query('UPDATE sanctions SET bans_remaining = 0, is_active = false WHERE id = $1', [s.id]);
+      } else {
+        await pool.query('UPDATE sanctions SET bans_remaining = $1 WHERE id = $2', [newRemaining, s.id]);
+      }
+    }
+  } catch(e) { console.error('decrementSuspensions error:', e); }
 };
 
 const calcPoints = async (pred, t1, t2, tournamentId) => {
@@ -316,7 +339,7 @@ app.get('/api/players/:id/detail', async (req, res) => {
     let sanctions = [];
     try {
       sanctions = (await pool.query(`
-        SELECT s.*, m.match_date, m.stage as match_stage,
+        SELECT s.*, s.bans_remaining, m.match_date, m.stage as match_stage,
           mt1.name as match_team1_name, mt2.name as match_team2_name
         FROM sanctions s
         LEFT JOIN matches m ON s.match_id = m.id
@@ -447,6 +470,11 @@ app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
       if(diff !== 0) await pool.query('UPDATE users SET total_points=GREATEST(0,COALESCE(total_points,0)+$1) WHERE id=$2',[diff,p.user_id]);
     }
     if(match?.next_match_id && match.team1_id && match.team2_id && team1_score!==team2_score){const wId=team1_score>team2_score?match.team1_id:match.team2_id;const lId=team1_score>team2_score?match.team2_id:match.team1_id;const sl=match.next_match_slot===2?'team2_id':'team1_id';await pool.query(`UPDATE matches SET ${sl}=$1 WHERE id=$2`,[wId,match.next_match_id]);if(match.bracket_round===4){const third=(await pool.query('SELECT id FROM matches WHERE tournament_id=$1 AND bracket_round=3 LIMIT 1',[match.tournament_id])).rows[0];if(third){const tsl=match.bracket_position===1?'team1_id':'team2_id';await pool.query(`UPDATE matches SET ${tsl}=$1 WHERE id=$2`,[lId,third.id]);}}}
+    // Decrement bans_remaining for suspended players whose team played this match
+    if (match?.team1_id && match?.team2_id) {
+      await decrementSuspensions(match.team1_id, match.tournament_id);
+      await decrementSuspensions(match.team2_id, match.tournament_id);
+    }
     res.json({message:'OK',predictions_processed:preds.length});
   } catch(e) { console.error(e); res.status(500).json({error:'Erreur'}); }
 });
@@ -855,8 +883,8 @@ app.post('/api/admin/sanctions', auth, adminAuth, async (req, res) => {
     if (!player_id || !type) return res.status(400).json({error:'Joueur et type requis'});
     
     const sanction = (await pool.query(
-      'INSERT INTO sanctions(player_id, tournament_id, match_id, type, reason, match_ban_count, minute, created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-      [player_id, tournament_id || null, match_id || null, type, reason || null, match_ban_count || 0, minute || null, req.userId]
+      'INSERT INTO sanctions(player_id, tournament_id, match_id, type, reason, match_ban_count, bans_remaining, minute, created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
+      [player_id, tournament_id || null, match_id || null, type, reason || null, match_ban_count || 0, match_ban_count || 0, minute || null, req.userId]
     )).rows[0];
     
     // Get player info for response
