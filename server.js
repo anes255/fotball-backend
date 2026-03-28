@@ -446,7 +446,25 @@ app.get('/api/admin/matches/tournament/:id', auth, adminAuth, async (req, res) =
 app.post('/api/matches', auth, adminAuth, async (req, res) => { try { const {tournament_id,team1_id,team2_id,match_date,stage,bracket_round,bracket_position,next_match_id,next_match_slot}=req.body; res.json((await pool.query('INSERT INTO matches(tournament_id,team1_id,team2_id,match_date,stage,status,team1_score,team2_score,bracket_round,bracket_position,next_match_id,next_match_slot) VALUES($1,$2,$3,$4,$5,$6,0,0,$7,$8,$9,$10) RETURNING *',[tournament_id,team1_id||null,team2_id||null,match_date,stage,'upcoming',bracket_round||null,bracket_position||null,next_match_id||null,next_match_slot||null])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.put('/api/matches/:id', auth, adminAuth, async (req, res) => { try { const {tournament_id,team1_id,team2_id,match_date,stage}=req.body; res.json((await pool.query('UPDATE matches SET tournament_id=$1,team1_id=$2,team2_id=$3,match_date=$4,stage=$5 WHERE id=$6 RETURNING *',[tournament_id,team1_id,team2_id,match_date,stage,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 app.delete('/api/matches/:id', auth, adminAuth, async (req, res) => { try { await pool.query('DELETE FROM predictions WHERE match_id=$1',[req.params.id]); await pool.query('DELETE FROM matches WHERE id=$1',[req.params.id]); res.json({message:'OK'}); } catch(e) { res.status(500).json({error:'Erreur'}); }});
-app.put('/api/matches/:id/start', auth, adminAuth, async (req, res) => { try { res.json((await pool.query("UPDATE matches SET status='live',team1_score=COALESCE(team1_score,0),team2_score=COALESCE(team2_score,0) WHERE id=$1 RETURNING *",[req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
+app.put('/api/matches/:id/start', auth, adminAuth, async (req, res) => {
+  try {
+    const match = (await pool.query('SELECT tournament_id, stage FROM matches WHERE id=$1', [req.params.id])).rows[0];
+    const updated = (await pool.query("UPDATE matches SET status='live',team1_score=COALESCE(team1_score,0),team2_score=COALESCE(team2_score,0) WHERE id=$1 RETURNING *", [req.params.id])).rows[0];
+    // Auto-lock all predictions once a knockout stage (non-group) match starts
+    if (match?.tournament_id && match?.stage) {
+      const stage = (match.stage || '').toLowerCase();
+      const isKnockout = !stage.includes('group') && !stage.includes('groupe') && stage !== 'groupes';
+      if (isKnockout) {
+        await pool.query(
+          'UPDATE tournaments SET lock_winner_prediction=true, lock_finalist_prediction=true, lock_player_predictions=true WHERE id=$1',
+          [match.tournament_id]
+        );
+        cacheClear();
+      }
+    }
+    res.json(updated);
+  } catch(e) { res.status(500).json({error:'Erreur'}); }
+});
 app.put('/api/matches/:id/score', auth, adminAuth, async (req, res) => { try { const {team1_score,team2_score}=req.body; res.json((await pool.query("UPDATE matches SET team1_score=$1,team2_score=$2 WHERE id=$3 RETURNING *",[team1_score,team2_score,req.params.id])).rows[0]); } catch(e) { res.status(500).json({error:'Erreur'}); }});
 
 app.put('/api/matches/:id/complete', auth, adminAuth, async (req, res) => {
